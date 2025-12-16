@@ -661,6 +661,34 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 	return body, nil
 }
 
+// filterExcludedBetas loại bỏ các beta header không mong muốn
+// Các beta có prefix trong danh sách sẽ bị loại bỏ
+var excludedBetaPrefixes = []string{
+	"context-1m-2025-08-07", // Ví dụ: context-1m-2025-08-07
+}
+
+func filterExcludedBetas(betas string) string {
+	parts := strings.Split(betas, ",")
+	var filtered []string
+	for _, beta := range parts {
+		beta = strings.TrimSpace(beta)
+		if beta == "" {
+			continue
+		}
+		excluded := false
+		for _, prefix := range excludedBetaPrefixes {
+			if strings.HasPrefix(beta, prefix) {
+				excluded = true
+				break
+			}
+		}
+		if !excluded {
+			filtered = append(filtered, beta)
+		}
+	}
+	return strings.Join(filtered, ",")
+}
+
 func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string) {
 	r.Header.Set("Authorization", "Bearer "+apiKey)
 	r.Header.Set("Content-Type", "application/json")
@@ -672,21 +700,37 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
-		baseBetas = val
-		if !strings.Contains(val, "oauth") {
+		// Filter loại bỏ các beta không mong muốn
+		val = filterExcludedBetas(val)
+		if val != "" {
+			baseBetas = val
+		}
+		if !strings.Contains(baseBetas, "oauth") {
 			baseBetas += ",oauth-2025-04-20"
 		}
 	}
 
 	// Merge extra betas from request body
 	if len(extraBetas) > 0 {
+		// Filter loại bỏ các beta không mong muốn từ extraBetas
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
 			existingSet[strings.TrimSpace(b)] = true
 		}
 		for _, beta := range extraBetas {
 			beta = strings.TrimSpace(beta)
-			if beta != "" && !existingSet[beta] {
+			if beta == "" || existingSet[beta] {
+				continue
+			}
+			// Kiểm tra beta có bị exclude không
+			excluded := false
+			for _, prefix := range excludedBetaPrefixes {
+				if strings.HasPrefix(beta, prefix) {
+					excluded = true
+					break
+				}
+			}
+			if !excluded {
 				baseBetas += "," + beta
 				existingSet[beta] = true
 			}
