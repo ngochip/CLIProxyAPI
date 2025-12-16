@@ -85,6 +85,10 @@ type Config struct {
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
+	// ModelAliases định nghĩa mapping từ model alias sang model chuẩn.
+	// Ví dụ: "claude-4.5-sonnet" → "claude-sonnet-4-5"
+	ModelAliases map[string]string `yaml:"model-aliases" json:"model-aliases"`
+
 	legacyMigrationPending bool `yaml:"-" json:"-"`
 }
 

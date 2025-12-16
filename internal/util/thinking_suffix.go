@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -12,6 +13,75 @@ const (
 	ReasoningEffortMetadataKey         = "reasoning_effort"
 	ThinkingOriginalModelMetadataKey   = "thinking_original_model"
 )
+
+// modelAliases map các tên model alias sang tên model chuẩn.
+// Ví dụ: "claude-4.5-sonnet-thinking" → "claude-sonnet-4-5-thinking"
+// Mặc định chứa các alias built-in, có thể được override bởi config.
+var (
+	modelAliases   = make(map[string]string)
+	aliasesMutex   sync.RWMutex
+	aliasesLoaded  bool
+)
+
+// defaultModelAliases chứa các alias mặc định khi không có config.
+var defaultModelAliases = map[string]string{
+	// Claude aliases với format khác
+	"claude-4.5-sonnet":               "claude-sonnet-4-5",
+	"claude-4.5-sonnet-thinking":      "claude-sonnet-4-5-thinking",
+	"claude-4.5-sonnet-thinking-low":  "claude-sonnet-4-5-thinking-low",
+	"claude-4.5-sonnet-thinking-medium": "claude-sonnet-4-5-thinking-medium",
+	"claude-4.5-sonnet-thinking-high": "claude-sonnet-4-5-thinking-high",
+	
+	"claude-4.5-opus":                 "claude-opus-4-5",
+	"claude-4.5-opus-thinking":        "claude-opus-4-5-thinking",
+	"claude-4.5-opus-thinking-low":    "claude-opus-4-5-thinking-low",
+	"claude-4.5-opus-thinking-medium": "claude-opus-4-5-thinking-medium",
+	"claude-4.5-opus-thinking-high":   "claude-opus-4-5-thinking-high",
+}
+
+// SetModelAliases cập nhật model aliases từ config.
+// Gọi function này khi load config để update aliases.
+func SetModelAliases(aliases map[string]string) {
+	aliasesMutex.Lock()
+	defer aliasesMutex.Unlock()
+	
+	// Start with default aliases
+	modelAliases = make(map[string]string)
+	for k, v := range defaultModelAliases {
+		modelAliases[strings.ToLower(k)] = v
+	}
+	
+	// Merge with config aliases (config overrides defaults)
+	for k, v := range aliases {
+		if strings.TrimSpace(k) != "" && strings.TrimSpace(v) != "" {
+			modelAliases[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
+		}
+	}
+	
+	aliasesLoaded = true
+}
+
+// getModelAliases trả về copy of current aliases (thread-safe).
+func getModelAliases() map[string]string {
+	aliasesMutex.RLock()
+	defer aliasesMutex.RUnlock()
+	
+	// Nếu chưa load, dùng default
+	if !aliasesLoaded {
+		result := make(map[string]string)
+		for k, v := range defaultModelAliases {
+			result[strings.ToLower(k)] = v
+		}
+		return result
+	}
+	
+	// Return copy
+	result := make(map[string]string)
+	for k, v := range modelAliases {
+		result[k] = v
+	}
+	return result
+}
 
 // thinkingModelAliases maps thinking model aliases to their actual upstream model names.
 // Ví dụ: "claude-sonnet-4-5-thinking" → "claude-sonnet-4-5-20250929"
@@ -43,6 +113,25 @@ var thinkingSuffixes = []struct {
 	{"-thinking", "medium"}, // Default thinking = medium
 }
 
+// ResolveModelAlias giải quyết alias model sang tên model chuẩn.
+// Ví dụ: "claude-4.5-sonnet-thinking" → "claude-sonnet-4-5-thinking"
+func ResolveModelAlias(modelName string) string {
+	if modelName == "" {
+		return modelName
+	}
+	
+	// Get current aliases (thread-safe)
+	aliases := getModelAliases()
+	
+	// Kiểm tra exact match (case-insensitive)
+	lower := strings.ToLower(strings.TrimSpace(modelName))
+	if resolved, ok := aliases[lower]; ok {
+		return resolved
+	}
+	
+	return modelName
+}
+
 // NormalizeThinkingModel parses dynamic thinking suffixes on model names and returns
 // the normalized base model with extracted metadata. Supported patterns:
 //   - "(<value>)" where value can be:
@@ -56,6 +145,7 @@ var thinkingSuffixes = []struct {
 //   - "gemini-2.5-pro(32768)" → budget=32768
 //   - "claude-sonnet-4-5-thinking" → base=claude-sonnet-4-5-20250929, effort=medium
 //   - "claude-opus-4-5-thinking-high" → base=claude-opus-4-5-20251101, effort=high
+//   - "claude-4.5-sonnet-thinking" → base=claude-sonnet-4-5-20250929, effort=medium (alias resolved)
 //
 // Note: Empty parentheses "()" are not supported and will be ignored.
 func NormalizeThinkingModel(modelName string) (string, map[string]any) {
@@ -63,7 +153,9 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 		return modelName, nil
 	}
 
-	baseModel := modelName
+	// Bước 1: Giải quyết alias trước
+	resolvedModel := ResolveModelAlias(modelName)
+	baseModel := resolvedModel
 
 	var (
 		budgetOverride  *int
@@ -131,7 +223,12 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 	}
 
 	metadata := map[string]any{
-		ThinkingOriginalModelMetadataKey: modelName,
+		ThinkingOriginalModelMetadataKey: modelName, // Lưu model name gốc từ request
+	}
+	
+	// Nếu có alias resolution, cũng lưu lại model đã resolved
+	if resolvedModel != modelName {
+		metadata["resolved_model"] = resolvedModel
 	}
 	if budgetOverride != nil {
 		metadata[ThinkingBudgetMetadataKey] = *budgetOverride

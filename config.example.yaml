@@ -39,6 +39,22 @@ api-keys:
 # Enable debug logging
 debug: false
 
+# Model aliases: Map custom model names to standard model names.
+# This allows you to use alternative naming conventions without modifying code.
+# Examples:
+#   "claude-4.5-sonnet" maps to "claude-sonnet-4-5"
+#   "claude-4.5-opus-thinking" maps to "claude-opus-4-5-thinking"
+model-aliases:
+  # Claude 4.5 aliases (alternative naming format)
+  claude-4.5-sonnet: "claude-sonnet-4-5-20250929"
+  claude-4.5-sonnet-thinking: "claude-sonnet-4-5-thinking"
+  
+  claude-4.5-opus: "claude-opus-4-5"
+  claude-4.5-opus-high-thinking: "claude-opus-4-5-thinking-high"
+  
+  # Add more custom aliases here as needed
+  # custom-model-name: "standard-model-name"
+
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
 

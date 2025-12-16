@@ -47,6 +47,19 @@ func init() {
 	buildinfo.BuildDate = BuildDate
 }
 
+// loadConfigWithAliases loads config và setup model aliases
+func loadConfigWithAliases(configFile string, optional bool) (*config.Config, error) {
+	cfg, err := config.LoadConfigOptional(configFile, optional)
+	if err != nil {
+		return nil, err
+	}
+	// Setup model aliases từ config
+	if cfg != nil {
+		util.SetModelAliases(cfg.ModelAliases)
+	}
+	return cfg, nil
+}
+
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -246,7 +259,7 @@ func main() {
 		}
 		cancel()
 		configFilePath = pgStoreInst.ConfigPath()
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		cfg, err = loadConfigWithAliases(configFilePath, isCloudDeploy)
 		if err == nil {
 			cfg.AuthDir = pgStoreInst.AuthDir()
 			log.Infof("postgres-backed token store enabled, workspace path: %s", pgStoreInst.WorkDir())
@@ -310,7 +323,7 @@ func main() {
 		}
 		cancel()
 		configFilePath = objectStoreInst.ConfigPath()
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		cfg, err = loadConfigWithAliases(configFilePath, isCloudDeploy)
 		if err == nil {
 			if cfg == nil {
 				cfg = &config.Config{}
@@ -357,14 +370,14 @@ func main() {
 			log.Errorf("failed to inspect git-backed config: %v", statErr)
 			return
 		}
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		cfg, err = loadConfigWithAliases(configFilePath, isCloudDeploy)
 		if err == nil {
 			cfg.AuthDir = gitStoreInst.AuthDir()
 			log.Infof("git-backed token store enabled, repository path: %s", gitStoreRoot)
 		}
 	} else if configPath != "" {
 		configFilePath = configPath
-		cfg, err = config.LoadConfigOptional(configPath, isCloudDeploy)
+		cfg, err = loadConfigWithAliases(configPath, isCloudDeploy)
 	} else {
 		wd, err = os.Getwd()
 		if err != nil {
@@ -372,7 +385,7 @@ func main() {
 			return
 		}
 		configFilePath = filepath.Join(wd, "config.yaml")
-		cfg, err = config.LoadConfigOptional(configFilePath, isCloudDeploy)
+		cfg, err = loadConfigWithAliases(configFilePath, isCloudDeploy)
 	}
 	if err != nil {
 		log.Errorf("failed to load config: %v", err)
