@@ -1,3 +1,6 @@
+// Package executor provides runtime execution capabilities for various AI service providers.
+// This file implements the AI Studio executor that routes requests through a websocket-backed
+// transport for the AI Studio provider.
 package executor
 
 import (
@@ -26,19 +29,28 @@ type AIStudioExecutor struct {
 	cfg      *config.Config
 }
 
-// NewAIStudioExecutor constructs a websocket executor for the provider name.
+// NewAIStudioExecutor creates a new AI Studio executor instance.
+//
+// Parameters:
+//   - cfg: The application configuration
+//   - provider: The provider name
+//   - relay: The websocket relay manager
+//
+// Returns:
+//   - *AIStudioExecutor: A new AI Studio executor instance
 func NewAIStudioExecutor(cfg *config.Config, provider string, relay *wsrelay.Manager) *AIStudioExecutor {
 	return &AIStudioExecutor{provider: strings.ToLower(provider), relay: relay, cfg: cfg}
 }
 
-// Identifier returns the logical provider key for routing.
+// Identifier returns the executor identifier.
 func (e *AIStudioExecutor) Identifier() string { return "aistudio" }
 
-// PrepareRequest is a no-op because websocket transport already injects headers.
+// PrepareRequest prepares the HTTP request for execution (no-op for AI Studio).
 func (e *AIStudioExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error {
 	return nil
 }
 
+// Execute performs a non-streaming request to the AI Studio API.
 func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -92,6 +104,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 	return resp, nil
 }
 
+// ExecuteStream performs a streaming request to the AI Studio API.
 func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	reporter := newUsageReporter(ctx, e.Identifier(), req.Model, auth)
 	defer reporter.trackFailure(ctx, &err)
@@ -239,6 +252,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 	return stream, nil
 }
 
+// CountTokens counts tokens for the given request using the AI Studio API.
 func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	_, body, err := e.translateRequest(req, opts, false)
 	if err != nil {
@@ -293,8 +307,8 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 	return cliproxyexecutor.Response{Payload: []byte(translated)}, nil
 }
 
-func (e *AIStudioExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
-	_ = ctx
+// Refresh refreshes the authentication credentials (no-op for AI Studio).
+func (e *AIStudioExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	return auth, nil
 }
 
@@ -308,7 +322,7 @@ func (e *AIStudioExecutor) translateRequest(req cliproxyexecutor.Request, opts c
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("gemini")
 	payload := sdktranslator.TranslateRequest(from, to, req.Model, bytes.Clone(req.Payload), stream)
-	payload = applyThinkingMetadata(payload, req.Metadata, req.Model)
+	payload = ApplyThinkingMetadata(payload, req.Metadata, req.Model)
 	payload = util.ApplyDefaultThinkingIfNeeded(req.Model, payload)
 	payload = util.ConvertThinkingLevelToBudget(payload)
 	payload = util.NormalizeGeminiThinkingBudget(req.Model, payload)
@@ -370,8 +384,16 @@ func ensureColonSpacedJSON(payload []byte) []byte {
 
 	for i := 0; i < len(indented); i++ {
 		ch := indented[i]
-		if ch == '"' && (i == 0 || indented[i-1] != '\\') {
-			inString = !inString
+		if ch == '"' {
+			// A quote is escaped only when preceded by an odd number of consecutive backslashes.
+			// For example: "\\\"" keeps the quote inside the string, but "\\\\" closes the string.
+			backslashes := 0
+			for j := i - 1; j >= 0 && indented[j] == '\\'; j-- {
+				backslashes++
+			}
+			if backslashes%2 == 0 {
+				inString = !inString
+			}
 		}
 
 		if !inString {

@@ -1,6 +1,8 @@
 package executor
 
 import (
+	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -9,9 +11,9 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// applyThinkingMetadata applies thinking config from model suffix metadata (e.g., -reasoning, -thinking-N)
+// ApplyThinkingMetadata applies thinking config from model suffix metadata (e.g., (high), (8192))
 // for standard Gemini format payloads. It normalizes the budget when the model supports thinking.
-func applyThinkingMetadata(payload []byte, metadata map[string]any, model string) []byte {
+func ApplyThinkingMetadata(payload []byte, metadata map[string]any, model string) []byte {
 	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, metadata)
 	if !ok || (budgetOverride == nil && includeOverride == nil) {
 		return payload
@@ -26,7 +28,7 @@ func applyThinkingMetadata(payload []byte, metadata map[string]any, model string
 	return util.ApplyGeminiThinkingConfig(payload, budgetOverride, includeOverride)
 }
 
-// applyThinkingMetadataCLI applies thinking config from model suffix metadata (e.g., -reasoning, -thinking-N)
+// applyThinkingMetadataCLI applies thinking config from model suffix metadata (e.g., (high), (8192))
 // for Gemini CLI format payloads (nested under "request"). It normalizes the budget when the model supports thinking.
 func applyThinkingMetadataCLI(payload []byte, metadata map[string]any, model string) []byte {
 	budgetOverride, includeOverride, ok := util.ResolveThinkingConfigFromMetadata(model, metadata)
@@ -43,41 +45,44 @@ func applyThinkingMetadataCLI(payload []byte, metadata map[string]any, model str
 	return util.ApplyGeminiCLIThinkingConfig(payload, budgetOverride, includeOverride)
 }
 
-// applyReasoningEffortMetadata applies reasoning effort overrides (reasoning.effort) when present in metadata.
-// It avoids overwriting an existing reasoning.effort field and only applies to models that support thinking.
-func applyReasoningEffortMetadata(payload []byte, metadata map[string]any, model string) []byte {
+// ApplyReasoningEffortMetadata applies reasoning effort overrides from metadata to the given JSON path.
+// Metadata values take precedence over any existing field when the model supports thinking, intentionally
+// overwriting caller-provided values to honor suffix/default metadata priority.
+func ApplyReasoningEffortMetadata(payload []byte, metadata map[string]any, model, field string, allowCompat bool) []byte {
 	if len(metadata) == 0 {
 		return payload
 	}
-	if !util.ModelSupportsThinking(model) {
+	if field == "" {
 		return payload
 	}
-	if gjson.GetBytes(payload, "reasoning.effort").Exists() {
+	baseModel := util.ResolveOriginalModel(model, metadata)
+	if baseModel == "" {
+		baseModel = model
+	}
+	if !util.ModelSupportsThinking(baseModel) && !allowCompat {
 		return payload
 	}
 	if effort, ok := util.ReasoningEffortFromMetadata(metadata); ok && effort != "" {
-		if updated, err := sjson.SetBytes(payload, "reasoning.effort", effort); err == nil {
-			return updated
+		if util.ModelUsesThinkingLevels(baseModel) || allowCompat {
+			if updated, err := sjson.SetBytes(payload, field, effort); err == nil {
+				return updated
+			}
 		}
 	}
-	return payload
-}
+	// Fallback: numeric thinking_budget suffix for level-based (OpenAI-style) models.
+	if util.ModelUsesThinkingLevels(baseModel) || allowCompat {
+		if budget, _, _, matched := util.ThinkingFromMetadata(metadata); matched && budget != nil {
+			if effort, ok := util.OpenAIThinkingBudgetToEffort(baseModel, *budget); ok && effort != "" {
+				if *budget == 0 && effort == "none" && util.ModelUsesThinkingLevels(baseModel) {
+					if _, supported := util.NormalizeReasoningEffortLevel(baseModel, effort); !supported {
+						return StripThinkingFields(payload, false)
+					}
+				}
 
-// applyReasoningEffortMetadataChatCompletions applies reasoning_effort (OpenAI chat completions field)
-// when present in metadata. It avoids overwriting an existing reasoning_effort field.
-func applyReasoningEffortMetadataChatCompletions(payload []byte, metadata map[string]any, model string) []byte {
-	if len(metadata) == 0 {
-		return payload
-	}
-	if !util.ModelSupportsThinking(model) {
-		return payload
-	}
-	if gjson.GetBytes(payload, "reasoning_effort").Exists() {
-		return payload
-	}
-	if effort, ok := util.ReasoningEffortFromMetadata(metadata); ok && effort != "" {
-		if updated, err := sjson.SetBytes(payload, "reasoning_effort", effort); err == nil {
-			return updated
+				if updated, err := sjson.SetBytes(payload, field, effort); err == nil {
+					return updated
+				}
+			}
 		}
 	}
 	return payload
@@ -231,4 +236,103 @@ func matchModelPattern(pattern, model string) bool {
 		pi++
 	}
 	return pi == len(pattern)
+}
+
+// NormalizeThinkingConfig normalizes thinking-related fields in the payload
+// based on model capabilities. For models without thinking support, it strips
+// reasoning fields. For models with level-based thinking, it validates and
+// normalizes the reasoning effort level. For models with numeric budget thinking,
+// it strips the effort string fields.
+func NormalizeThinkingConfig(payload []byte, model string, allowCompat bool) []byte {
+	if len(payload) == 0 || model == "" {
+		return payload
+	}
+
+	if !util.ModelSupportsThinking(model) {
+		if allowCompat {
+			return payload
+		}
+		return StripThinkingFields(payload, false)
+	}
+
+	if util.ModelUsesThinkingLevels(model) {
+		return NormalizeReasoningEffortLevel(payload, model)
+	}
+
+	// Model supports thinking but uses numeric budgets, not levels.
+	// Strip effort string fields since they are not applicable.
+	return StripThinkingFields(payload, true)
+}
+
+// StripThinkingFields removes thinking-related fields from the payload for
+// models that do not support thinking. If effortOnly is true, only removes
+// effort string fields (for models using numeric budgets).
+func StripThinkingFields(payload []byte, effortOnly bool) []byte {
+	fieldsToRemove := []string{
+		"reasoning_effort",
+		"reasoning.effort",
+	}
+	if !effortOnly {
+		fieldsToRemove = append([]string{"reasoning"}, fieldsToRemove...)
+	}
+	out := payload
+	for _, field := range fieldsToRemove {
+		if gjson.GetBytes(out, field).Exists() {
+			out, _ = sjson.DeleteBytes(out, field)
+		}
+	}
+	return out
+}
+
+// NormalizeReasoningEffortLevel validates and normalizes the reasoning_effort
+// or reasoning.effort field for level-based thinking models.
+func NormalizeReasoningEffortLevel(payload []byte, model string) []byte {
+	out := payload
+
+	if effort := gjson.GetBytes(out, "reasoning_effort"); effort.Exists() {
+		if normalized, ok := util.NormalizeReasoningEffortLevel(model, effort.String()); ok {
+			out, _ = sjson.SetBytes(out, "reasoning_effort", normalized)
+		}
+	}
+
+	if effort := gjson.GetBytes(out, "reasoning.effort"); effort.Exists() {
+		if normalized, ok := util.NormalizeReasoningEffortLevel(model, effort.String()); ok {
+			out, _ = sjson.SetBytes(out, "reasoning.effort", normalized)
+		}
+	}
+
+	return out
+}
+
+// ValidateThinkingConfig checks for unsupported reasoning levels on level-based models.
+// Returns a statusErr with 400 when an unsupported level is supplied to avoid silently
+// downgrading requests.
+func ValidateThinkingConfig(payload []byte, model string) error {
+	if len(payload) == 0 || model == "" {
+		return nil
+	}
+	if !util.ModelSupportsThinking(model) || !util.ModelUsesThinkingLevels(model) {
+		return nil
+	}
+
+	levels := util.GetModelThinkingLevels(model)
+	checkField := func(path string) error {
+		if effort := gjson.GetBytes(payload, path); effort.Exists() {
+			if _, ok := util.NormalizeReasoningEffortLevel(model, effort.String()); !ok {
+				return statusErr{
+					code: http.StatusBadRequest,
+					msg:  fmt.Sprintf("unsupported reasoning effort level %q for model %s (supported: %s)", effort.String(), model, strings.Join(levels, ", ")),
+				}
+			}
+		}
+		return nil
+	}
+
+	if err := checkField("reasoning_effort"); err != nil {
+		return err
+	}
+	if err := checkField("reasoning.effort"); err != nil {
+		return err
+	}
+	return nil
 }
