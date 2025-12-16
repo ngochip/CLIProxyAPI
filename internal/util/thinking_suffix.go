@@ -13,16 +13,49 @@ const (
 	ThinkingOriginalModelMetadataKey   = "thinking_original_model"
 )
 
+// thinkingModelAliases maps thinking model aliases to their actual upstream model names.
+// Ví dụ: "claude-sonnet-4-5-thinking" → "claude-sonnet-4-5-20250929"
+var thinkingModelAliases = map[string]string{
+	"claude-sonnet-4-5":  "claude-sonnet-4-5-20250929",
+	"claude-opus-4-5":    "claude-opus-4-5-20251101",
+	"claude-sonnet-4":    "claude-sonnet-4-20250514",
+	"claude-opus-4":      "claude-opus-4-20250514",
+	"claude-opus-4-1":    "claude-opus-4-1-20250805",
+	"claude-3-7-sonnet":  "claude-3-7-sonnet-20250219",
+	"claude-3-5-sonnet":  "claude-3-5-sonnet-20241022",
+	"claude-3-5-haiku":   "claude-3-5-haiku-20241022",
+	"claude-3-opus":      "claude-3-opus-20240229",
+	"claude-3-sonnet":    "claude-3-sonnet-20240229",
+	"claude-3-haiku":     "claude-3-haiku-20240307",
+}
+
+// thinkingSuffixes định nghĩa các suffix và reasoning effort tương ứng
+var thinkingSuffixes = []struct {
+	suffix string
+	effort string
+}{
+	{"-thinking-high", "high"},
+	{"-high-thinking", "high"},
+	{"-thinking-medium", "medium"},
+	{"-medium-thinking", "medium"},
+	{"-thinking-low", "low"},
+	{"-low-thinking", "low"},
+	{"-thinking", "medium"}, // Default thinking = medium
+}
+
 // NormalizeThinkingModel parses dynamic thinking suffixes on model names and returns
-// the normalized base model with extracted metadata. Supported pattern:
+// the normalized base model with extracted metadata. Supported patterns:
 //   - "(<value>)" where value can be:
 //   - A numeric budget (e.g., "(8192)", "(16384)")
 //   - A reasoning effort level (e.g., "(high)", "(medium)", "(low)")
+//   - "-thinking", "-thinking-low", "-thinking-medium", "-thinking-high" suffixes
 //
 // Examples:
 //   - "claude-sonnet-4-5-20250929(16384)" → budget=16384
 //   - "gpt-5.1(high)" → reasoning_effort="high"
 //   - "gemini-2.5-pro(32768)" → budget=32768
+//   - "claude-sonnet-4-5-thinking" → base=claude-sonnet-4-5-20250929, effort=medium
+//   - "claude-opus-4-5-thinking-high" → base=claude-opus-4-5-20251101, effort=high
 //
 // Note: Empty parentheses "()" are not supported and will be ignored.
 func NormalizeThinkingModel(modelName string) (string, map[string]any) {
@@ -38,34 +71,57 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 		matched         bool
 	)
 
-	// Match "(<value>)" pattern at the end of the model name
-	if idx := strings.LastIndex(modelName, "("); idx != -1 {
-		if !strings.HasSuffix(modelName, ")") {
-			// Incomplete parenthesis, ignore
-			return baseModel, nil
-		}
+	// Kiểm tra suffix -thinking trước
+	for _, ts := range thinkingSuffixes {
+		if strings.HasSuffix(strings.ToLower(modelName), ts.suffix) {
+			// Lấy base model prefix (phần trước suffix -thinking)
+			prefix := modelName[:len(modelName)-len(ts.suffix)]
 
-		value := modelName[idx+1 : len(modelName)-1] // Extract content between ( and )
-		if value == "" {
-			// Empty parentheses not supported
-			return baseModel, nil
-		}
+			// Tìm mapping trong thinkingModelAliases
+			if actualModel, ok := thinkingModelAliases[strings.ToLower(prefix)]; ok {
+				baseModel = actualModel
+			} else {
+				// Nếu không có alias, giữ nguyên prefix (có thể đã là model đầy đủ)
+				baseModel = prefix
+			}
 
-		candidateBase := modelName[:idx]
-
-		// Auto-detect: pure numeric → budget, string → reasoning effort level
-		if parsed, ok := parseIntPrefix(value); ok {
-			// Numeric value: treat as thinking budget
-			baseModel = candidateBase
-			budgetOverride = &parsed
+			effort := ts.effort
+			reasoningEffort = &effort
 			matched = true
-		} else {
-			// String value: treat as reasoning effort level
-			baseModel = candidateBase
-			raw := strings.ToLower(strings.TrimSpace(value))
-			if raw != "" {
-				reasoningEffort = &raw
+			break
+		}
+	}
+
+	// Match "(<value>)" pattern at the end of the model name
+	if !matched {
+		if idx := strings.LastIndex(modelName, "("); idx != -1 {
+			if !strings.HasSuffix(modelName, ")") {
+				// Incomplete parenthesis, ignore
+				return baseModel, nil
+			}
+
+			value := modelName[idx+1 : len(modelName)-1] // Extract content between ( and )
+			if value == "" {
+				// Empty parentheses not supported
+				return baseModel, nil
+			}
+
+			candidateBase := modelName[:idx]
+
+			// Auto-detect: pure numeric → budget, string → reasoning effort level
+			if parsed, ok := parseIntPrefix(value); ok {
+				// Numeric value: treat as thinking budget
+				baseModel = candidateBase
+				budgetOverride = &parsed
 				matched = true
+			} else {
+				// String value: treat as reasoning effort level
+				baseModel = candidateBase
+				raw := strings.ToLower(strings.TrimSpace(value))
+				if raw != "" {
+					reasoningEffort = &raw
+					matched = true
+				}
 			}
 		}
 	}
