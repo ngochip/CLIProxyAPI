@@ -338,17 +338,10 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	// Resolve "auto" model to an actual available model first
 	resolvedModelName := util.ResolveAutoModel(modelName)
 
-	providerName, extractedModelName, isDynamic := h.parseDynamicModel(resolvedModelName)
-
-	targetModelName := resolvedModelName
-	if isDynamic {
-		targetModelName = extractedModelName
-	}
-
 	// CRITICAL: Resolve alias BEFORE provider lookup
 	// This allows "claude-4.5-opus-thinking" to become "claude-opus-4-5-thinking"
 	// which can then be found in the registry
-	targetModelName = util.ResolveModelAlias(targetModelName)
+	resolvedModelName = util.ResolveModelAlias(resolvedModelName)
 
 	// Normalize the model name to handle dynamic thinking suffixes before determining the provider.
 	normalizedModel, metadata = normalizeModelMetadata(resolvedModelName)

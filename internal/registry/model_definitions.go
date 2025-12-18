@@ -42,28 +42,6 @@ func GetClaudeModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
 		},
 		{
-			ID:                  "claude-sonnet-4-5-thinking",
-			Object:              "model",
-			Created:             1759104000, // 2025-09-29
-			OwnedBy:             "anthropic",
-			Type:                "claude",
-			DisplayName:         "Claude 4.5 Sonnet Thinking",
-			ContextLength:       200000,
-			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
-		},
-		{
-			ID:                  "claude-opus-4-5-thinking",
-			Object:              "model",
-			Created:             1761955200, // 2025-11-01
-			OwnedBy:             "anthropic",
-			Type:                "claude",
-			DisplayName:         "Claude 4.5 Opus Thinking",
-			ContextLength:       200000,
-			MaxCompletionTokens: 64000,
-			Thinking:            &ThinkingSupport{Min: 1024, Max: 100000, ZeroAllowed: false, DynamicAllowed: true},
-		},
-		{
 			ID:                  "claude-opus-4-1-20250805",
 			Object:              "model",
 			Created:             1722945600, // 2025-08-05
