@@ -28,8 +28,8 @@ import (
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
 	// Setup statistics persistence
-	// File sẽ được lưu cùng thư mục với config file
-	statsPath := filepath.Join(filepath.Dir(configPath), "usage_statistics.json")
+	// File sẽ được lưu trong thư mục logs (để persist qua Docker volume)
+	statsPath := filepath.Join(filepath.Dir(configPath), "logs", "usage_statistics.json")
 	usage.SetStatsFilePath(statsPath)
 
 	// Load statistics từ file (nếu có)

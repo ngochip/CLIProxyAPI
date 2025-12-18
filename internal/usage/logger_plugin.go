@@ -417,16 +417,27 @@ func (s *RequestStatistics) Save() error {
 		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	// Ghi file với atomic write (write to temp file, then rename)
+	// Thử atomic write trước (write to temp file, then rename)
+	// Nếu rename thất bại (ví dụ: Docker file mount), fallback về direct write
 	tmpFile := filePath + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
-		return fmt.Errorf("failed to write temp file %s: %w", tmpFile, err)
+		// Fallback: ghi trực tiếp vào file
+		log.Debugf("temp file write failed, trying direct write: %v", err)
+		if directErr := os.WriteFile(filePath, data, 0o644); directErr != nil {
+			return fmt.Errorf("failed to write statistics file: %w", directErr)
+		}
+		return nil
 	}
 
 	if err := os.Rename(tmpFile, filePath); err != nil {
-		// Cleanup temp file nếu rename thất bại
+		// Cleanup temp file
 		_ = os.Remove(tmpFile)
-		return fmt.Errorf("failed to rename temp file: %w", err)
+		// Fallback: ghi trực tiếp vào file (thường xảy ra với Docker file mount)
+		log.Debugf("atomic rename failed, trying direct write: %v", err)
+		if directErr := os.WriteFile(filePath, data, 0o644); directErr != nil {
+			return fmt.Errorf("failed to write statistics file: %w", directErr)
+		}
+		return nil
 	}
 
 	log.Infof("statistics saved to %s (%d bytes)", filePath, len(data))
