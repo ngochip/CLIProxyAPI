@@ -47,10 +47,9 @@ debug: false
 model-aliases:
   # Claude 4.5 aliases (alternative naming format)
   claude-4.5-sonnet: "claude-sonnet-4-5-20250929"
-  claude-4.5-sonnet-thinking: "claude-sonnet-4-5-thinking"
-  
-  claude-4.5-opus: "claude-opus-4-5"
-  claude-4.5-opus-high-thinking: "claude-opus-4-5-thinking-high"
+  claude-4.5-sonnet-thinking: "claude-sonnet-4-5-20250929(medium)"
+  claude-4.5-opus: "claude-opus-4-5-20251101"
+  claude-4.5-opus-high-thinking: "claude-opus-4-5-20251101(high)"
   
   # Add more custom aliases here as needed
   # custom-model-name: "standard-model-name"
