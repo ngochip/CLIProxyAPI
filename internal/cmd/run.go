@@ -7,11 +7,13 @@ import (
 	"context"
 	"errors"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,6 +27,20 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
+	// Setup statistics persistence
+	// File sẽ được lưu cùng thư mục với config file
+	statsPath := filepath.Join(filepath.Dir(configPath), "usage_statistics.json")
+	usage.SetStatsFilePath(statsPath)
+
+	// Load statistics từ file (nếu có)
+	if err := usage.GetRequestStatistics().Load(); err != nil {
+		log.Warnf("failed to load statistics: %v", err)
+	}
+
+	// Start auto-save mỗi 5 phút
+	autoSaveCtx, autoSaveCancel := context.WithCancel(context.Background())
+	usage.StartAutoSave(autoSaveCtx, 5*time.Minute)
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
@@ -46,6 +62,8 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	service, err := builder.Build()
 	if err != nil {
 		log.Errorf("failed to build proxy service: %v", err)
+		autoSaveCancel()
+		usage.StopAutoSave()
 		return
 	}
 
@@ -53,6 +71,10 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		log.Errorf("proxy service exited with error: %v", err)
 	}
+
+	// Cleanup: dừng auto-save và save lần cuối
+	autoSaveCancel()
+	usage.StopAutoSave()
 }
 
 // WaitForCloudDeploy waits indefinitely for shutdown signals in cloud deploy mode

@@ -873,6 +873,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		}
 	}
 
+	// Hot-reload model aliases khi config thay đổi
+	util.SetModelAliases(cfg.ModelAliases)
+
 	prevSecretEmpty := true
 	if oldCfg != nil {
 		prevSecretEmpty = oldCfg.RemoteManagement.SecretKey == ""

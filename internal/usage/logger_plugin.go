@@ -5,16 +5,43 @@ package usage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
+
+// statsFilePath chứa đường dẫn file lưu statistics.
+// Nếu trống, statistics sẽ không được persist.
+var statsFilePath atomic.Value
+
+// autoSaveCancel dùng để cancel auto-save goroutine
+var autoSaveCancel context.CancelFunc
+var autoSaveMu sync.Mutex
+
+// SetStatsFilePath đặt đường dẫn file lưu statistics.
+// Gọi hàm này trước khi gọi Load() hoặc StartAutoSave().
+func SetStatsFilePath(path string) {
+	statsFilePath.Store(path)
+}
+
+// GetStatsFilePath trả về đường dẫn file lưu statistics hiện tại.
+func GetStatsFilePath() string {
+	if v := statsFilePath.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
 
 func init() {
 	statisticsEnabled.Store(true)
@@ -346,4 +373,184 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+// Save lưu statistics ra file JSON.
+// File path được lấy từ SetStatsFilePath().
+// Trả về error nếu không thể ghi file.
+func (s *RequestStatistics) Save() error {
+	if s == nil {
+		return nil
+	}
+	filePath := GetStatsFilePath()
+	if filePath == "" {
+		return nil // Không có file path, skip save
+	}
+
+	snapshot := s.Snapshot()
+	data, err := json.MarshalIndent(snapshot, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal statistics: %w", err)
+	}
+
+	// Tạo thư mục nếu chưa tồn tại
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	// Ghi file với atomic write (write to temp file, then rename)
+	tmpFile := filePath + ".tmp"
+	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
+		return fmt.Errorf("failed to write temp file: %w", err)
+	}
+
+	if err := os.Rename(tmpFile, filePath); err != nil {
+		// Cleanup temp file nếu rename thất bại
+		_ = os.Remove(tmpFile)
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	log.Debugf("statistics saved to %s (%d bytes)", filePath, len(data))
+	return nil
+}
+
+// Load đọc statistics từ file JSON và restore vào memory.
+// File path được lấy từ SetStatsFilePath().
+// Trả về error nếu không thể đọc file (trừ trường hợp file không tồn tại).
+func (s *RequestStatistics) Load() error {
+	if s == nil {
+		return nil
+	}
+	filePath := GetStatsFilePath()
+	if filePath == "" {
+		return nil // Không có file path, skip load
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Debugf("statistics file not found, starting fresh: %s", filePath)
+			return nil // File chưa tồn tại, không phải lỗi
+		}
+		return fmt.Errorf("failed to read statistics file: %w", err)
+	}
+
+	if len(data) == 0 {
+		log.Debugf("statistics file is empty, starting fresh: %s", filePath)
+		return nil
+	}
+
+	var snapshot StatisticsSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return fmt.Errorf("failed to unmarshal statistics: %w", err)
+	}
+
+	// Restore vào RequestStatistics
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.totalRequests = snapshot.TotalRequests
+	s.successCount = snapshot.SuccessCount
+	s.failureCount = snapshot.FailureCount
+	s.totalTokens = snapshot.TotalTokens
+
+	// Restore requestsByDay
+	s.requestsByDay = make(map[string]int64, len(snapshot.RequestsByDay))
+	for k, v := range snapshot.RequestsByDay {
+		s.requestsByDay[k] = v
+	}
+
+	// Restore requestsByHour (convert string key back to int)
+	s.requestsByHour = make(map[int]int64, len(snapshot.RequestsByHour))
+	for k, v := range snapshot.RequestsByHour {
+		if hour, err := strconv.Atoi(k); err == nil {
+			s.requestsByHour[hour] = v
+		}
+	}
+
+	// Restore tokensByDay
+	s.tokensByDay = make(map[string]int64, len(snapshot.TokensByDay))
+	for k, v := range snapshot.TokensByDay {
+		s.tokensByDay[k] = v
+	}
+
+	// Restore tokensByHour (convert string key back to int)
+	s.tokensByHour = make(map[int]int64, len(snapshot.TokensByHour))
+	for k, v := range snapshot.TokensByHour {
+		if hour, err := strconv.Atoi(k); err == nil {
+			s.tokensByHour[hour] = v
+		}
+	}
+
+	// Restore APIs
+	s.apis = make(map[string]*apiStats, len(snapshot.APIs))
+	for apiName, apiSnap := range snapshot.APIs {
+		stats := &apiStats{
+			TotalRequests: apiSnap.TotalRequests,
+			TotalTokens:   apiSnap.TotalTokens,
+			Models:        make(map[string]*modelStats, len(apiSnap.Models)),
+		}
+		for modelName, modelSnap := range apiSnap.Models {
+			details := make([]RequestDetail, len(modelSnap.Details))
+			copy(details, modelSnap.Details)
+			stats.Models[modelName] = &modelStats{
+				TotalRequests: modelSnap.TotalRequests,
+				TotalTokens:   modelSnap.TotalTokens,
+				Details:       details,
+			}
+		}
+		s.apis[apiName] = stats
+	}
+
+	log.Infof("statistics loaded from %s: %d total requests", filePath, s.totalRequests)
+	return nil
+}
+
+// StartAutoSave bắt đầu auto-save statistics định kỳ.
+// Gọi StopAutoSave() để dừng auto-save.
+func StartAutoSave(ctx context.Context, interval time.Duration) {
+	autoSaveMu.Lock()
+	defer autoSaveMu.Unlock()
+
+	// Dừng auto-save cũ nếu đang chạy
+	if autoSaveCancel != nil {
+		autoSaveCancel()
+	}
+
+	ctx, autoSaveCancel = context.WithCancel(ctx)
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Debug("auto-save stopped")
+				return
+			case <-ticker.C:
+				if err := defaultRequestStatistics.Save(); err != nil {
+					log.Errorf("auto-save statistics failed: %v", err)
+				}
+			}
+		}
+	}()
+	log.Infof("auto-save started with interval %v", interval)
+}
+
+// StopAutoSave dừng auto-save và save lần cuối.
+func StopAutoSave() {
+	autoSaveMu.Lock()
+	if autoSaveCancel != nil {
+		autoSaveCancel()
+		autoSaveCancel = nil
+	}
+	autoSaveMu.Unlock()
+
+	// Save lần cuối khi shutdown
+	if err := defaultRequestStatistics.Save(); err != nil {
+		log.Errorf("final statistics save failed: %v", err)
+	} else {
+		log.Info("statistics saved on shutdown")
+	}
 }

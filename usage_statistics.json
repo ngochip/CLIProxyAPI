@@ -1,0 +1,11 @@
+{
+  "total_requests": 0,
+  "success_count": 0,
+  "failure_count": 0,
+  "total_tokens": 0,
+  "apis": {},
+  "requests_by_day": {},
+  "requests_by_hour": {},
+  "tokens_by_day": {},
+  "tokens_by_hour": {}
+}
