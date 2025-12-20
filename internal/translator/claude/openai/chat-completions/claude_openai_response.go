@@ -291,10 +291,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				"prompt_tokens":     usage.Get("input_tokens").Int(),
 				// "completion_tokens": usage.Get("output_tokens").Int(),
 				// "output_tokens":     usage.Get("output_tokens").Int(),
-				"completion_tokens": usage.Get("input_tokens").Int() + usage.Get("output_tokens").Int(),
+				"completion_tokens": usage.Get("output_tokens").Int(),
 				"total_tokens":      usage.Get("input_tokens").Int() + usage.Get("output_tokens").Int(),
 			}
 			template, _ = sjson.Set(template, "usage", usageObj)
+			// Log thông tin token usage cho request Claude
+			log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d.", modelName, usage.Get("input_tokens").Int(), usage.Get("output_tokens").Int(), usage.Get("input_tokens").Int() + usage.Get("output_tokens").Int())
+
 		}
 		return []string{template}
 
