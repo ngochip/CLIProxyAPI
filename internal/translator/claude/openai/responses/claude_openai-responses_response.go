@@ -10,6 +10,7 @@ import (
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	log "github.com/sirupsen/logrus"
 )
 
 type claudeToResponsesState struct {
@@ -695,6 +696,10 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			out, _ = sjson.Set(out, "usage.output_tokens_details.reasoning_tokens", reasoningTokens)
 		}
 	}
+
+	// Log thông tin token usage cho request Claude
+	log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", model, inputTokens, outputTokens, totalTokens, reasoningTokens)
+
 
 	return out
 }
