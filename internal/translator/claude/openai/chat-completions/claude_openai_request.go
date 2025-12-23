@@ -38,41 +38,84 @@ var (
 	legacySignatureRegex = regexp.MustCompile("```plaintext:Signature:([\\s\\S]*?)```")
 )
 
-// deriveSessionID tạo sessionID từ hash của first user message
-// SessionID dùng để lookup thinking cache
-func deriveSessionID(rawJSON []byte) string {
-	messages := gjson.GetBytes(rawJSON, "messages")
-	if !messages.IsArray() {
-		return ""
+// Note: deriveSessionID đã bị loại bỏ vì không cần thiết.
+// Cache chỉ cần thinkingID là đủ để lookup.
+
+// ensureAssistantThinkingBlock kiểm tra và fix assistant message khi thinking enabled
+// Theo Claude API: "When thinking is enabled, a final assistant message must start with 
+// a thinking block (preceeding the lastmost set of tool_use and tool_result blocks)"
+// 
+// Nếu assistant message không có thinking block → Disable thinking tạm thời
+// (Vì Claude không thể regenerate thinking - sẽ báo lỗi "thinking required")
+func ensureAssistantThinkingBlock(requestJSON string) string {
+	// Kiểm tra xem thinking có enabled không
+	thinkingType := gjson.Get(requestJSON, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return requestJSON
 	}
-	for _, msg := range messages.Array() {
-		if msg.Get("role").String() == "user" {
-			content := msg.Get("content").String()
-			if content == "" {
-				content = msg.Get("content.0.text").String()
-			}
-			if content != "" {
-				return cache.GenerateThinkingID(content)
-			}
+
+	// Lấy tất cả messages
+	messagesResult := gjson.Get(requestJSON, "messages")
+	if !messagesResult.IsArray() || len(messagesResult.Array()) == 0 {
+		return requestJSON
+	}
+
+	messages := messagesResult.Array()
+	
+	// Tìm assistant message cuối cùng
+	lastAssistantIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Get("role").String() == "assistant" {
+			lastAssistantIdx = i
+			break
 		}
 	}
-	return ""
+
+	// Nếu không có assistant message, không cần fix
+	if lastAssistantIdx == -1 {
+		return requestJSON
+	}
+
+	// Kiểm tra content của assistant message cuối
+	lastAssistant := messages[lastAssistantIdx]
+	content := lastAssistant.Get("content")
+	if !content.IsArray() || len(content.Array()) == 0 {
+		return requestJSON
+	}
+
+	contentArray := content.Array()
+	firstContentType := contentArray[0].Get("type").String()
+
+	// Nếu đã bắt đầu bằng thinking hoặc redacted_thinking, OK
+	if firstContentType == "thinking" || firstContentType == "redacted_thinking" {
+		return requestJSON
+	}
+
+	// Nếu không có thinking block → Disable thinking tạm thời
+	// (Claude sẽ báo lỗi nếu thinking enabled mà không có thinking content)
+	result, _ := sjson.Delete(requestJSON, "thinking")
+	
+	log.Warnf("⚠ Disabled thinking for request (assistant message has no thinking block)")
+	
+	return result
 }
 
 // extractThinkingFromContent trích xuất thinking từ text content
 // Hỗ trợ 2 formats:
 // 1. New format: thinkId marker ```plaintext:thinkId:xxx``` -> lookup cache
 // 2. Legacy format: ```plaintext:Thinking\n...\n``` + ```plaintext:Signature:...```
-func extractThinkingFromContent(sessionID, text string) []interface{} {
+func extractThinkingFromContent(text string) []interface{} {
 	// Thử tìm thinkId marker trước (new format)
 	idMatch := thinkIdRegex.FindStringSubmatch(text)
 	if len(idMatch) > 1 {
 		thinkingID := idMatch[1]
-		entry := cache.GetCachedThinking(sessionID, thinkingID)
+		entry := cache.GetCachedThinking(thinkingID)
 		
+		// Nếu tìm thấy cache với valid signature → restore thinking block
 		if entry != nil && cache.HasValidSignature(entry.Signature) {
 			// Found valid cache → restore thinking
-			log.Debugf("Found cached thinking (sessionID=%s, thinkingID=%s)", sessionID, thinkingID)
+			log.Infof("✓ Restored cached thinking (thinkingID=%s, textLen=%d, sigLen=%d)", 
+				thinkingID, len(entry.ThinkingText), len(entry.Signature))
 			
 			// Remove <think> tag và thinkId marker từ text
 			remainingText := thinkTagRegex.ReplaceAllString(text, "")
@@ -101,8 +144,52 @@ func extractThinkingFromContent(sessionID, text string) []interface{} {
 			return parts
 		}
 		
-		// Cache miss - log và tiếp tục xử lý như không có thinking
-		log.Debugf("Thinking cache miss (sessionID=%s, thinkingID=%s) - will regenerate", sessionID, thinkingID)
+		// Cache miss hoặc invalid signature - fallback: parse thinking từ <think> tag
+		// Claude API sẽ regenerate signature mới
+		if entry != nil {
+			log.Warnf("✗ Thinking cache found but invalid signature (thinkingID=%s, sigLen=%d) - will regenerate signature", 
+				thinkingID, len(entry.Signature))
+		} else {
+			log.Warnf("✗ Thinking cache miss (thinkingID=%s) - will regenerate signature", 
+				thinkingID)
+		}
+		
+		// Fallback: extract thinking từ <think> tag
+		thinkMatch := thinkTagRegex.FindStringSubmatch(text)
+		if len(thinkMatch) > 1 {
+			thinkingText := thinkMatch[1]
+			
+			// Unescape ``` trong thinking text (vì nó đã bị escape khi stream)
+			thinkingText = strings.ReplaceAll(thinkingText, "\\`\\`\\`", "```")
+			thinkingText = strings.TrimSpace(thinkingText)
+			
+			// Remove <think> tag và thinkId marker từ remaining text
+			remainingText := thinkTagRegex.ReplaceAllString(text, "")
+			remainingText = thinkIdRegex.ReplaceAllString(remainingText, "")
+			remainingText = strings.TrimSpace(remainingText)
+			
+			var parts []interface{}
+			
+			// Part 1: thinking block KHÔNG CÓ signature (để Claude regenerate)
+			thinkingPart := map[string]interface{}{
+				"type":     "thinking",
+				"thinking": thinkingText,
+				// Không có signature → Claude API sẽ regenerate
+			}
+			parts = append(parts, thinkingPart)
+			
+			// Part 2: phần text còn lại (nếu có)
+			if remainingText != "" {
+				textPart := map[string]interface{}{
+					"type": "text",
+					"text": remainingText,
+				}
+				parts = append(parts, textPart)
+			}
+			
+			log.Infof("→ Fallback: extracted thinking from <think> tag (textLen=%d) - signature will be regenerated", len(thinkingText))
+			return parts
+		}
 	}
 	
 	// Thử legacy format (backward compatibility)
@@ -113,7 +200,6 @@ func extractThinkingFromContent(sessionID, text string) []interface{} {
 		signatureText := signatureMatch[1]
 		
 		// Unescape ``` trong thinking text
-		thinkingText = strings.ReplaceAll(thinkingText, "\\`\\`\\`", "```")
 
 		// Xóa các blocks khỏi text gốc
 		remainingText := legacyThinkingRegex.ReplaceAllString(text, "")
@@ -182,9 +268,6 @@ func extractThinkingFromContent(sessionID, text string) []interface{} {
 func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := bytes.Clone(inputRawJSON)
 
-	// Derive sessionID để lookup thinking cache
-	sessionID := deriveSessionID(rawJSON)
-
 	if account == "" {
 		u, _ := uuid.NewRandom()
 		account = u.String()
@@ -220,6 +303,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
 					}
 				}
+				log.Debugf("Applied thinking from reasoning_effort=%s: type=%s, budget=%d", effort, gjson.Get(out, "thinking.type").String(), budget)
+			} else {
+				log.Warnf("Failed to convert reasoning_effort=%s to budget for model=%s", effort, modelName)
 			}
 		}
 	}
@@ -300,7 +386,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 				// Handle content based on its type (string or array)
 				if contentResult.Exists() && contentResult.Type == gjson.String && contentResult.String() != "" {
-					parts := extractThinkingFromContent(sessionID, contentResult.String())
+					parts := extractThinkingFromContent(contentResult.String())
 					for _, part := range parts {
 						msg, _ = sjson.Set(msg, "content.-1", part)
 					}
@@ -310,7 +396,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 						switch partType {
 						case "text":
-							parts := extractThinkingFromContent(sessionID, part.Get("text").String())
+							parts := extractThinkingFromContent(part.Get("text").String())
 							for _, p := range parts {
 								msg, _ = sjson.Set(msg, "content.-1", p)
 							}
@@ -472,6 +558,11 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 		default:
 		}
 	}
+
+	// Fix assistant messages when thinking is enabled
+	// Claude API yêu cầu: "When thinking is enabled, a final assistant message must start 
+	// with a thinking block (preceeding the lastmost set of tool_use and tool_result blocks)"
+	out = ensureAssistantThinkingBlock(out)
 
 	return []byte(out)
 }

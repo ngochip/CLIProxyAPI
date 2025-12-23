@@ -18,27 +18,8 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// deriveSessionIDFromRequest generates a stable session ID from the original request.
-// Uses the hash of the first user message to identify the conversation.
-func deriveSessionIDFromRequest(rawJSON []byte) string {
-	messages := gjson.GetBytes(rawJSON, "messages")
-	if !messages.IsArray() {
-		return ""
-	}
-	for _, msg := range messages.Array() {
-		if msg.Get("role").String() == "user" {
-			content := msg.Get("content").String()
-			if content == "" {
-				// Try to get text from content array
-				content = msg.Get("content.0.text").String()
-			}
-			if content != "" {
-				return cache.GenerateThinkingID(content)
-			}
-		}
-	}
-	return ""
-}
+// Note: deriveSessionIDFromRequest đã bị loại bỏ vì không cần thiết.
+// Cache chỉ cần thinkingID là đủ để lookup.
 
 var (
 	dataTag = []byte("data:")
@@ -49,8 +30,6 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	CreatedAt    int64
 	ResponseID   string
 	FinishReason string
-	// SessionID để cache thinking (derived từ original request)
-	SessionID string
 	// Tool calls accumulator for streaming
 	ToolCallsAccumulator    map[int]*ToolCallAccumulator
 	// Thinking accumulator for streaming
@@ -85,13 +64,10 @@ type ThinkingAccumulator struct {
 //   - []string: A slice of strings, each containing an OpenAI-compatible JSON response
 func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) []string {
 	if *param == nil {
-		// Derive sessionID từ original request
-		sessionID := deriveSessionIDFromRequest(originalRequestRawJSON)
 		*param = &ConvertAnthropicResponseToOpenAIParams{
 			CreatedAt:    0,
 			ResponseID:   "",
 			FinishReason: "",
-			SessionID:    sessionID,
 		}
 	}
 
@@ -104,7 +80,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	eventType := root.Get("type").String()
 	
 	// Base OpenAI streaming response template
-	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"response_metadata":{}},"finish_reason":null}]}`
+	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"response_metadata":{}},"finish_reason":null}], "metadata": {"sessionId": "123"}}`
 
 	// Set model
 	if modelName != "" {
@@ -203,7 +179,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 					// Lưu thinking text gốc (không escape) để cache
 					originalThinkingText := thinking.String()
 					// Escape ``` trong thinking để không break format khi hiển thị
-					escapedThinkingText := strings.ReplaceAll(originalThinkingText, "```", "\\`\\`\\`")
+					//escapedThinkingText := strings.ReplaceAll(originalThinkingText, "```", "\\`\\`\\`")
 					if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
 						if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
 							// Lưu text gốc để cache signature đúng
@@ -211,7 +187,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 						}
 					}
 					// Stream escaped thinking delta để hiển thị
-					template, _ = sjson.Set(template, "choices.0.delta.content", escapedThinkingText)
+					template, _ = sjson.Set(template, "choices.0.delta.content", originalThinkingText)
 					hasContent = true
 				}
 			case "signature_delta":
@@ -282,10 +258,9 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				thinkingID := cache.GenerateThinkingID(thinkingText)
 				
 				// Cache thinking với signature
-				sessionID := (*param).(*ConvertAnthropicResponseToOpenAIParams).SessionID
-				if sessionID != "" && thinkingText != "" {
-					cache.CacheThinking(sessionID, thinkingID, thinkingText, signatureText)
-					log.Debugf("Cached thinking block (sessionID=%s, thinkingID=%s, textLen=%d)", sessionID, thinkingID, len(thinkingText))
+				if thinkingText != "" {
+					cache.CacheThinking(thinkingID, thinkingText, signatureText)
+					log.Debugf("Cached thinking block (thinkingID=%s, textLen=%d)", thinkingID, len(thinkingText))
 				}
 				
 				// Stream closing </think> tag + hidden thinkId marker
@@ -317,10 +292,14 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
 			cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
 
-			template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
-			template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
-			template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", cacheCreationInputTokens)
-			template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cacheReadInputTokens)
+			// template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
+			// template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
+			// template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", cacheCreationInputTokens)
+			// template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cacheReadInputTokens)
+
+			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokens)
+			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokens)
+			template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
 			// template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
 			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
 		}
