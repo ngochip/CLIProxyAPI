@@ -104,8 +104,8 @@ func BuildErrorResponseBody(status int, errText string) []byte {
 // Returning 0 disables keep-alives (default when unset).
 func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 	seconds := defaultStreamingKeepAliveSeconds
-	if cfg != nil && cfg.Streaming.KeepAliveSeconds != nil {
-		seconds = *cfg.Streaming.KeepAliveSeconds
+	if cfg != nil {
+		seconds = cfg.Streaming.KeepAliveSeconds
 	}
 	if seconds <= 0 {
 		return 0
@@ -116,8 +116,8 @@ func StreamingKeepAliveInterval(cfg *config.SDKConfig) time.Duration {
 // StreamingBootstrapRetries returns how many times a streaming request may be retried before any bytes are sent.
 func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	retries := defaultStreamingBootstrapRetries
-	if cfg != nil && cfg.Streaming.BootstrapRetries != nil {
-		retries = *cfg.Streaming.BootstrapRetries
+	if cfg != nil {
+		retries = cfg.Streaming.BootstrapRetries
 	}
 	if retries < 0 {
 		retries = 0
@@ -623,7 +623,22 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	}
 
 	body := BuildErrorResponseBody(status, errText)
-	c.Set("API_RESPONSE", bytes.Clone(body))
+	// Append first to preserve upstream response logs, then drop duplicate payloads if already recorded.
+	var previous []byte
+	if existing, exists := c.Get("API_RESPONSE"); exists {
+		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
+			previous = bytes.Clone(existingBytes)
+		}
+	}
+	appendAPIResponse(c, body)
+	trimmedErrText := strings.TrimSpace(errText)
+	trimmedBody := bytes.TrimSpace(body)
+	if len(previous) > 0 {
+		if (trimmedErrText != "" && bytes.Contains(previous, []byte(trimmedErrText))) ||
+			(len(trimmedBody) > 0 && bytes.Contains(previous, trimmedBody)) {
+			c.Set("API_RESPONSE", previous)
+		}
+	}
 
 	if !c.Writer.Written() {
 		c.Writer.Header().Set("Content-Type", "application/json")

@@ -80,7 +80,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	eventType := root.Get("type").String()
 	
 	// Base OpenAI streaming response template
-	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"response_metadata":{}},"finish_reason":null}], "metadata": {"sessionId": "123"}}`
+	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"response_metadata":{}},"finish_reason":null}]}`
 
 	// Set model
 	if modelName != "" {
@@ -289,18 +289,12 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		if usage := root.Get("usage"); usage.Exists() {
 			inputTokens := usage.Get("input_tokens").Int()
 			outputTokens := usage.Get("output_tokens").Int()
-			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
 			cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
-
-			// template, _ = sjson.Set(template, "usage.input_tokens", inputTokens)
-			// template, _ = sjson.Set(template, "usage.output_tokens", outputTokens)
-			// template, _ = sjson.Set(template, "usage.cache_creation_input_tokens", cacheCreationInputTokens)
-			// template, _ = sjson.Set(template, "usage.cache_read_input_tokens", cacheReadInputTokens)
-
-			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokens)
+			cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
+			template, _ = sjson.Set(template, "usage.prompt_tokens", inputTokens+cacheCreationInputTokens)
 			template, _ = sjson.Set(template, "usage.completion_tokens", outputTokens)
-			template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
-			// template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
+			template, _ = sjson.Set(template, "usage.total_tokens", inputTokens+outputTokens)
+			template, _ = sjson.Set(template, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
 			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, inputTokens+outputTokens+cacheCreationInputTokens+cacheReadInputTokens)
 		}
 		return []string{template}
@@ -376,8 +370,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	var messageID string
 	var model string
 	var createdAt int64
-	var inputTokens, outputTokens int64
-	var reasoningTokens int64
 	var stopReason string
 	var contentParts []string
 	toolCallsAccumulator := make(map[int]*ToolCallAccumulator)
@@ -393,9 +385,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				messageID = message.Get("id").String()
 				model = message.Get("model").String()
 				createdAt = time.Now().Unix()
-				if usage := message.Get("usage"); usage.Exists() {
-					inputTokens = usage.Get("input_tokens").Int()
-				}
 			}
 
 		case "content_block_start":
@@ -472,7 +461,14 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				}
 			}
 			if usage := root.Get("usage"); usage.Exists() {
-				outputTokens = usage.Get("output_tokens").Int()
+				inputTokens := usage.Get("input_tokens").Int()
+				outputTokens := usage.Get("output_tokens").Int()
+				cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
+				cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
+				out, _ = sjson.Set(out, "usage.prompt_tokens", inputTokens+cacheCreationInputTokens)
+				out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
+				out, _ = sjson.Set(out, "usage.total_tokens", inputTokens+outputTokens)
+				out, _ = sjson.Set(out, "usage.prompt_tokens_details.cached_tokens", cacheReadInputTokens)
 			}
 		}
 	}
