@@ -41,7 +41,44 @@ func (e *ClaudeExecutor) Identifier() string { return "claude" }
 
 func (e *ClaudeExecutor) PrepareRequest(_ *http.Request, _ *cliproxyauth.Auth) error { return nil }
 
+// isCredentialError kiểm tra xem error có phải là lỗi credential chỉ dùng cho Claude Code không
+func isCredentialError(errMsg string) bool {
+	return strings.Contains(errMsg, "This credential is only authorized for use with Claude Code") ||
+		strings.Contains(errMsg, "only authorized for use with Claude Code")
+}
+
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	// Thử execute request lần đầu
+	resp, err = e.executeInternal(ctx, auth, req, opts)
+	
+	// Nếu không có lỗi => return ngay
+	if err == nil {
+		return resp, nil
+	}
+	
+	// Check xem có phải credential error không
+	if statusErr, ok := err.(statusErr); ok && statusErr.code == 400 {
+		if isCredentialError(statusErr.msg) {
+			log.Warnf("claude executor: detected credential error, attempting token refresh")
+			
+			// Refresh token
+			refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+			if refreshErr != nil {
+				log.Errorf("claude executor: token refresh failed: %v", refreshErr)
+				return resp, err // Return original error
+			}
+			
+			log.Infof("claude executor: token refreshed successfully, retrying request")
+			
+			// Retry với refreshed auth
+			return e.executeInternal(ctx, refreshedAuth, req, opts)
+		}
+	}
+	
+	return resp, err
+}
+
+func (e *ClaudeExecutor) executeInternal(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	apiKey, baseURL := claudeCreds(auth)
 
 	if baseURL == "" {
@@ -162,6 +199,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 }
 
 func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
+	return e.executeStreamWithRetry(ctx, auth, req, opts, false)
+}
+
+func (e *ClaudeExecutor) executeStreamWithRetry(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, isRetry bool) (stream <-chan cliproxyexecutor.StreamChunk, err error) {
 	apiKey, baseURL := claudeCreds(auth)
 
 	if baseURL == "" {
@@ -238,6 +279,24 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+		
+		// Check nếu là credential error và chưa retry => thử refresh và retry
+		if !isRetry && httpResp.StatusCode == 400 && isCredentialError(string(b)) {
+			log.Warnf("claude executor: detected credential error in stream, attempting token refresh")
+			
+			refreshedAuth, refreshErr := e.Refresh(ctx, auth)
+			if refreshErr != nil {
+				log.Errorf("claude executor: token refresh failed: %v", refreshErr)
+				err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+				return nil, err
+			}
+			
+			log.Infof("claude executor: token refreshed successfully, retrying stream request")
+			
+			// Retry với refreshed auth (isRetry = true để tránh infinite loop)
+			return e.executeStreamWithRetry(ctx, refreshedAuth, req, opts, true)
+		}
+		
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
@@ -411,7 +470,8 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		return auth, nil
 	}
 	svc := claudeauth.NewClaudeAuth(e.cfg)
-	td, err := svc.RefreshTokens(ctx, refreshToken)
+	// Sử dụng RefreshTokensWithRetry để tăng độ tin cậy (retry 3 lần)
+	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
 		return nil, err
 	}
