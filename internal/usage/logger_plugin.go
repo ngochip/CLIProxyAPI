@@ -17,7 +17,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
-	log "github.com/sirupsen/logrus"
+	// log "github.com/sirupsen/logrus"
 )
 
 var statisticsEnabled atomic.Bool
@@ -239,14 +239,14 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 
 	s.mu.Unlock()
 
-	log.Debugf("Record(): request #%d recorded, model=%s, tokens=%d", currentRequests, modelName, totalTokens)
+	// log.Debugf("Record(): request #%d recorded, model=%s, tokens=%d", currentRequests, modelName, totalTokens)
 
 	// Auto-save sau mỗi 10 requests để đảm bảo không mất dữ liệu
 	if currentRequests%10 == 0 {
 		go func() {
-			log.Infof("triggering auto-save after %d requests", currentRequests)
+			// log.Infof("triggering auto-save after %d requests", currentRequests)
 			if err := s.Save(); err != nil {
-				log.Errorf("auto-save after %d requests failed: %v", currentRequests, err)
+				// log.Errorf("auto-save after %d requests failed: %v", currentRequests, err)
 			}
 		}()
 	}
@@ -522,12 +522,12 @@ func (s *RequestStatistics) Save() error {
 	}
 	filePath := GetStatsFilePath()
 	if filePath == "" {
-		log.Warn("Save() called but statsFilePath is empty, skipping")
+		// log.Warn("Save() called but statsFilePath is empty, skipping")
 		return nil // Không có file path, skip save
 	}
 
 	snapshot := s.Snapshot()
-	log.Infof("Save(): total_requests=%d, file=%s", snapshot.TotalRequests, filePath)
+	// log.Infof("Save(): total_requests=%d, file=%s", snapshot.TotalRequests, filePath)
 	
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
@@ -545,7 +545,7 @@ func (s *RequestStatistics) Save() error {
 	tmpFile := filePath + ".tmp"
 	if err := os.WriteFile(tmpFile, data, 0o644); err != nil {
 		// Fallback: ghi trực tiếp vào file
-		log.Debugf("temp file write failed, trying direct write: %v", err)
+		// log.Debugf("temp file write failed, trying direct write: %v", err)
 		if directErr := os.WriteFile(filePath, data, 0o644); directErr != nil {
 			return fmt.Errorf("failed to write statistics file: %w", directErr)
 		}
@@ -556,14 +556,14 @@ func (s *RequestStatistics) Save() error {
 		// Cleanup temp file
 		_ = os.Remove(tmpFile)
 		// Fallback: ghi trực tiếp vào file (thường xảy ra với Docker file mount)
-		log.Debugf("atomic rename failed, trying direct write: %v", err)
+		// log.Debugf("atomic rename failed, trying direct write: %v", err)
 		if directErr := os.WriteFile(filePath, data, 0o644); directErr != nil {
 			return fmt.Errorf("failed to write statistics file: %w", directErr)
 		}
 		return nil
 	}
 
-	log.Infof("statistics saved to %s (%d bytes)", filePath, len(data))
+	// log.Infof("statistics saved to %s (%d bytes)", filePath, len(data))
 	return nil
 }
 
@@ -582,14 +582,14 @@ func (s *RequestStatistics) Load() error {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Debugf("statistics file not found, starting fresh: %s", filePath)
+			// log.Debugf("statistics file not found, starting fresh: %s", filePath)
 			return nil // File chưa tồn tại, không phải lỗi
 		}
 		return fmt.Errorf("failed to read statistics file: %w", err)
 	}
 
 	if len(data) == 0 {
-		log.Debugf("statistics file is empty, starting fresh: %s", filePath)
+		// log.Debugf("statistics file is empty, starting fresh: %s", filePath)
 		return nil
 	}
 
@@ -655,7 +655,7 @@ func (s *RequestStatistics) Load() error {
 		s.apis[apiName] = stats
 	}
 
-	log.Infof("statistics loaded from %s: %d total requests", filePath, s.totalRequests)
+	// log.Infof("statistics loaded from %s: %d total requests", filePath, s.totalRequests)
 	return nil
 }
 
@@ -666,7 +666,7 @@ func StartAutoSave(ctx context.Context, interval time.Duration) {
 	defer autoSaveMu.Unlock()
 
 	filePath := GetStatsFilePath()
-	log.Infof("auto-save starting: interval=%v, file=%s", interval, filePath)
+	// log.Infof("auto-save starting: interval=%v, file=%s", interval, filePath)
 
 	// Dừng auto-save cũ nếu đang chạy
 	if autoSaveCancel != nil {
@@ -681,23 +681,23 @@ func StartAutoSave(ctx context.Context, interval time.Duration) {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Debug("auto-save stopped")
+				// log.Debug("auto-save stopped")
 				return
 			case <-ticker.C:
 				stats := defaultRequestStatistics
 				stats.mu.RLock()
 				totalReqs := stats.totalRequests
 				stats.mu.RUnlock()
-				log.Infof("auto-save tick: saving %d requests to %s", totalReqs, GetStatsFilePath())
+				// log.Infof("auto-save tick: saving %d requests to %s", totalReqs, GetStatsFilePath())
 				if err := defaultRequestStatistics.Save(); err != nil {
-					log.Errorf("auto-save statistics failed: %v", err)
+					// log.Errorf("auto-save statistics failed: %v", err)
 				} else {
-					log.Infof("auto-save completed successfully")
+					// log.Infof("auto-save completed successfully")
 				}
 			}
 		}
 	}()
-	log.Infof("auto-save goroutine started with interval %v", interval)
+	// log.Infof("auto-save goroutine started with interval %v", interval)
 }
 
 // StopAutoSave dừng auto-save và save lần cuối.
@@ -711,8 +711,8 @@ func StopAutoSave() {
 
 	// Save lần cuối khi shutdown
 	if err := defaultRequestStatistics.Save(); err != nil {
-		log.Errorf("final statistics save failed: %v", err)
+		// log.Errorf("final statistics save failed: %v", err)
 	} else {
-		log.Info("statistics saved on shutdown")
+		// log.Info("statistics saved on shutdown")
 	}
 }

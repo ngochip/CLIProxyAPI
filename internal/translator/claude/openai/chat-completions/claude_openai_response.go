@@ -260,7 +260,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				// Cache thinking với signature
 				if thinkingText != "" {
 					cache.CacheThinking(thinkingID, thinkingText, signatureText)
-					log.Debugf("Cached thinking block (thinkingID=%s, textLen=%d)", thinkingID, len(thinkingText))
+					// log.Debugf("Cached thinking block (thinkingID=%s, textLen=%d)", thinkingID, len(thinkingText))
 				}
 				
 				// Stream closing </think> tag + hidden thinkId marker
@@ -353,7 +353,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 // Returns:
 //   - string: An OpenAI-compatible JSON response containing all message content and metadata
 func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) string {
-	log.Debug("ConvertClaudeResponseToOpenAINonStream called")
+	// log.Debug("ConvertClaudeResponseToOpenAINonStream called")
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))

@@ -95,7 +95,7 @@ func ensureAssistantThinkingBlock(requestJSON string) string {
 	// (Claude sẽ báo lỗi nếu thinking enabled mà không có thinking content)
 	result, _ := sjson.Delete(requestJSON, "thinking")
 	
-	log.Warnf("⚠ Disabled thinking for request (assistant message has no thinking block)")
+	// log.Warnf("⚠ Disabled thinking for request (assistant message has no thinking block)")
 	
 	return result
 }
@@ -114,8 +114,8 @@ func extractThinkingFromContent(text string) []interface{} {
 		// Nếu tìm thấy cache với valid signature → restore thinking block
 		if entry != nil && cache.HasValidSignature(entry.Signature) {
 			// Found valid cache → restore thinking
-			log.Infof("✓ Restored cached thinking (thinkingID=%s, textLen=%d, sigLen=%d)", 
-				thinkingID, len(entry.ThinkingText), len(entry.Signature))
+			// log.Infof("✓ Restored cached thinking (thinkingID=%s, textLen=%d, sigLen=%d)", 
+			// 	thinkingID, len(entry.ThinkingText), len(entry.Signature))
 			
 			// Remove <think> tag và thinkId marker từ text
 			remainingText := thinkTagRegex.ReplaceAllString(text, "")
@@ -146,13 +146,13 @@ func extractThinkingFromContent(text string) []interface{} {
 		
 		// Cache miss hoặc invalid signature - fallback: parse thinking từ <think> tag
 		// Claude API sẽ regenerate signature mới
-		if entry != nil {
-			log.Warnf("✗ Thinking cache found but invalid signature (thinkingID=%s, sigLen=%d) - will regenerate signature", 
-				thinkingID, len(entry.Signature))
-		} else {
-			log.Warnf("✗ Thinking cache miss (thinkingID=%s) - will regenerate signature", 
-				thinkingID)
-		}
+		// if entry != nil {
+		// 	log.Warnf("✗ Thinking cache found but invalid signature (thinkingID=%s, sigLen=%d) - will regenerate signature", 
+		// 		thinkingID, len(entry.Signature))
+		// } else {
+		// 	log.Warnf("✗ Thinking cache miss (thinkingID=%s) - will regenerate signature", 
+		// 		thinkingID)
+		// }
 		
 		// Fallback: extract thinking từ <think> tag
 		thinkMatch := thinkTagRegex.FindStringSubmatch(text)
@@ -187,7 +187,7 @@ func extractThinkingFromContent(text string) []interface{} {
 				parts = append(parts, textPart)
 			}
 			
-			log.Infof("→ Fallback: extracted thinking from <think> tag (textLen=%d) - signature will be regenerated", len(thinkingText))
+			// log.Infof("→ Fallback: extracted thinking from <think> tag (textLen=%d) - signature will be regenerated", len(thinkingText))
 			return parts
 		}
 	}
@@ -303,9 +303,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 						out, _ = sjson.Set(out, "thinking.budget_tokens", budget)
 					}
 				}
-				log.Debugf("Applied thinking from reasoning_effort=%s: type=%s, budget=%d", effort, gjson.Get(out, "thinking.type").String(), budget)
+				// log.Debugf("Applied thinking from reasoning_effort=%s: type=%s, budget=%d", effort, gjson.Get(out, "thinking.type").String(), budget)
 			} else {
-				log.Warnf("Failed to convert reasoning_effort=%s to budget for model=%s", effort, modelName)
+				// log.Warnf("Failed to convert reasoning_effort=%s to budget for model=%s", effort, modelName)
 			}
 		}
 	}
