@@ -478,6 +478,11 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	out, _ = sjson.Set(out, "created", createdAt)
 	out, _ = sjson.Set(out, "model", model)
 
+	// Set accumulated content
+	if len(contentParts) > 0 {
+		out, _ = sjson.Set(out, "choices.0.message.content", strings.Join(contentParts, ""))
+	}
+
 	// Set tool calls if any were accumulated during processing
 	if len(toolCallsAccumulator) > 0 {
 		toolCallsCount := 0
