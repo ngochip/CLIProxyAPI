@@ -31,9 +31,9 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	ResponseID   string
 	FinishReason string
 	// Tool calls accumulator for streaming
-	ToolCallsAccumulator    map[int]*ToolCallAccumulator
+	ToolCallsAccumulator map[int]*ToolCallAccumulator
 	// Thinking accumulator for streaming
-	ThinkingAccumulator     map[int]*ThinkingAccumulator
+	ThinkingAccumulator map[int]*ThinkingAccumulator
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -78,7 +78,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 	root := gjson.ParseBytes(rawJSON)
 	eventType := root.Get("type").String()
-	
+
 	// Base OpenAI streaming response template
 	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"response_metadata":{}},"finish_reason":null}]}`
 
@@ -225,7 +225,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	case "content_block_stop":
 		// End of content block - output complete tool call if it's a tool_use block or thinking if it's a thinking block
 		index := int(root.Get("index").Int())
-		
+
 		// Check for tool call accumulator
 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator != nil {
 			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index]; exists {
@@ -246,34 +246,34 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 				return []string{template}
 			}
 		}
-		
+
 		// Check for thinking accumulator
 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
 			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
 				// Lấy thinking text và signature đã accumulate
 				thinkingText := accumulator.Thinking.String()
 				signatureText := accumulator.Signature.String()
-				
+
 				// Generate thinkingID từ hash của thinking text
 				thinkingID := cache.GenerateThinkingID(thinkingText)
-				
+
 				// Cache thinking với signature
 				if thinkingText != "" {
 					cache.CacheThinking(thinkingID, thinkingText, signatureText)
 					// log.Debugf("Cached thinking block (thinkingID=%s, textLen=%d)", thinkingID, len(thinkingText))
 				}
-				
+
 				// Stream closing </think> tag + hidden thinkId marker
 				closingContent := "\n</think>\n```plaintext:thinkId:" + thinkingID + "```\n"
 				template, _ = sjson.Set(template, "choices.0.delta.content", closingContent)
-			
+
 				// Clean up the accumulator for this index
 				delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator, index)
 
 				return []string{template}
 			}
 		}
-		
+
 		return []string{}
 
 	case "message_delta":
@@ -392,7 +392,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			if contentBlock := root.Get("content_block"); contentBlock.Exists() {
 				blockType := contentBlock.Get("type").String()
 				// index := int(root.Get("index").Int())
-				
+
 				if blockType == "thinking" {
 
 				} else if blockType == "tool_use" {
@@ -410,7 +410,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 			if delta := root.Get("delta"); delta.Exists() {
 				deltaType := delta.Get("type").String()
 				// index := int(root.Get("index").Int())
-				
+
 				switch deltaType {
 				case "text_delta":
 					// Accumulate text content
@@ -527,7 +527,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 	// out, _ = sjson.Set(out, "usage.completion_tokens", outputTokens)
 	// out, _ = sjson.Set(out, "usage.total_tokens", totalTokens)
 
-	
 	// // Add reasoning tokens to usage details if any reasoning content was processed
 	// if reasoningTokens > 0 {
 	// 	out, _ = sjson.Set(out, "usage.completion_tokens_details.reasoning_tokens", reasoningTokens)
@@ -535,7 +534,6 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 	// // Log thông tin token usage cho request Claude
 	// log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, totalTokens: %d, reasoningTokens: %d.", model, inputTokens, outputTokens, totalTokens, reasoningTokens)
-
 
 	return out
 }
