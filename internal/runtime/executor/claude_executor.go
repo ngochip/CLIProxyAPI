@@ -534,17 +534,6 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
-// injectThinkingConfig adds thinking configuration based on metadata using the unified flow.
-// It uses util.ResolveClaudeThinkingConfig which internally calls ResolveThinkingConfigFromMetadata
-// and NormalizeThinkingBudget, ensuring consistency with other executors like Gemini.
-func (e *ClaudeExecutor) injectThinkingConfig(modelName string, metadata map[string]any, body []byte) []byte {
-	budget, ok := util.ResolveClaudeThinkingConfig(modelName, metadata)
-	if !ok {
-		return body
-	}
-	return util.ApplyClaudeThinkingConfig(body, budget)
-}
-
 // ensureTemperatureForThinking sets temperature = 1 when thinking is enabled.
 // Claude API requires temperature = 1 when extended thinking is enabled.
 // This function should be called after all thinking configuration is finalized.
