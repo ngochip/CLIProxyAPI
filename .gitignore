@@ -26,7 +26,6 @@ auths/*
 !auths/.gitkeep
 
 # Documentation
-docs/*
 AGENTS.md
 CLAUDE.md
 GEMINI.md
