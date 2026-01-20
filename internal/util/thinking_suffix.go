@@ -13,26 +13,31 @@ const (
 	ReasoningEffortMetadataKey           = "reasoning_effort"
 	ThinkingOriginalModelMetadataKey     = "thinking_original_model"
 	ModelMappingOriginalModelMetadataKey = "model_mapping_original_model"
+
+	// Legacy Gemini-specific metadata keys for backward compatibility
+	GeminiThinkingBudgetMetadataKey  = "gemini_thinking_budget"
+	GeminiIncludeThoughtsMetadataKey = "gemini_include_thoughts"
+	GeminiOriginalModelMetadataKey   = "gemini_original_model"
 )
 
 // modelAliases map các tên model alias sang tên model chuẩn.
 // Ví dụ: "claude-4.5-sonnet-thinking" → "claude-sonnet-4-5-thinking"
 // Mặc định chứa các alias built-in, có thể được override bởi config.
 var (
-	modelAliases   = make(map[string]string)
-	aliasesMutex   sync.RWMutex
-	aliasesLoaded  bool
+	modelAliases  = make(map[string]string)
+	aliasesMutex  sync.RWMutex
+	aliasesLoaded bool
 )
 
 // defaultModelAliases chứa các alias mặc định khi không có config.
 var defaultModelAliases = map[string]string{
 	// Claude aliases với format khác
-	"claude-4.5-sonnet":               "claude-sonnet-4-5",
-	"claude-4.5-sonnet-thinking":      "claude-sonnet-4-5-thinking",
-	"claude-4.5-sonnet-thinking-low":  "claude-sonnet-4-5-thinking-low",
+	"claude-4.5-sonnet":                 "claude-sonnet-4-5",
+	"claude-4.5-sonnet-thinking":        "claude-sonnet-4-5-thinking",
+	"claude-4.5-sonnet-thinking-low":    "claude-sonnet-4-5-thinking-low",
 	"claude-4.5-sonnet-thinking-medium": "claude-sonnet-4-5-thinking-medium",
-	"claude-4.5-sonnet-thinking-high": "claude-sonnet-4-5-thinking-high",
-	
+	"claude-4.5-sonnet-thinking-high":   "claude-sonnet-4-5-thinking-high",
+
 	"claude-4.5-opus":                 "claude-opus-4-5",
 	"claude-4.5-opus-thinking":        "claude-opus-4-5-thinking",
 	"claude-4.5-opus-thinking-low":    "claude-opus-4-5-thinking-low",
@@ -45,20 +50,20 @@ var defaultModelAliases = map[string]string{
 func SetModelAliases(aliases map[string]string) {
 	aliasesMutex.Lock()
 	defer aliasesMutex.Unlock()
-	
+
 	// Start with default aliases
 	modelAliases = make(map[string]string)
 	for k, v := range defaultModelAliases {
 		modelAliases[strings.ToLower(k)] = v
 	}
-	
+
 	// Merge with config aliases (config overrides defaults)
 	for k, v := range aliases {
 		if strings.TrimSpace(k) != "" && strings.TrimSpace(v) != "" {
 			modelAliases[strings.ToLower(strings.TrimSpace(k))] = strings.TrimSpace(v)
 		}
 	}
-	
+
 	aliasesLoaded = true
 }
 
@@ -66,7 +71,7 @@ func SetModelAliases(aliases map[string]string) {
 func getModelAliases() map[string]string {
 	aliasesMutex.RLock()
 	defer aliasesMutex.RUnlock()
-	
+
 	// Nếu chưa load, dùng default
 	if !aliasesLoaded {
 		result := make(map[string]string)
@@ -75,7 +80,7 @@ func getModelAliases() map[string]string {
 		}
 		return result
 	}
-	
+
 	// Return copy
 	result := make(map[string]string)
 	for k, v := range modelAliases {
@@ -87,17 +92,17 @@ func getModelAliases() map[string]string {
 // thinkingModelAliases maps thinking model aliases to their actual upstream model names.
 // Ví dụ: "claude-sonnet-4-5-thinking" → "claude-sonnet-4-5-20250929"
 var thinkingModelAliases = map[string]string{
-	"claude-sonnet-4-5":  "claude-sonnet-4-5-20250929",
-	"claude-opus-4-5":    "claude-opus-4-5-20251101",
-	"claude-sonnet-4":    "claude-sonnet-4-20250514",
-	"claude-opus-4":      "claude-opus-4-20250514",
-	"claude-opus-4-1":    "claude-opus-4-1-20250805",
-	"claude-3-7-sonnet":  "claude-3-7-sonnet-20250219",
-	"claude-3-5-sonnet":  "claude-3-5-sonnet-20241022",
-	"claude-3-5-haiku":   "claude-3-5-haiku-20241022",
-	"claude-3-opus":      "claude-3-opus-20240229",
-	"claude-3-sonnet":    "claude-3-sonnet-20240229",
-	"claude-3-haiku":     "claude-3-haiku-20240307",
+	"claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
+	"claude-opus-4-5":   "claude-opus-4-5-20251101",
+	"claude-sonnet-4":   "claude-sonnet-4-20250514",
+	"claude-opus-4":     "claude-opus-4-20250514",
+	"claude-opus-4-1":   "claude-opus-4-1-20250805",
+	"claude-3-7-sonnet": "claude-3-7-sonnet-20250219",
+	"claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
+	"claude-3-5-haiku":  "claude-3-5-haiku-20241022",
+	"claude-3-opus":     "claude-3-opus-20240229",
+	"claude-3-sonnet":   "claude-3-sonnet-20240229",
+	"claude-3-haiku":    "claude-3-haiku-20240307",
 }
 
 // thinkingSuffixes định nghĩa các suffix và reasoning effort tương ứng
@@ -120,16 +125,16 @@ func ResolveModelAlias(modelName string) string {
 	if modelName == "" {
 		return modelName
 	}
-	
+
 	// Get current aliases (thread-safe)
 	aliases := getModelAliases()
-	
+
 	// Kiểm tra exact match (case-insensitive)
 	lower := strings.ToLower(strings.TrimSpace(modelName))
 	if resolved, ok := aliases[lower]; ok {
 		return resolved
 	}
-	
+
 	return modelName
 }
 
@@ -226,7 +231,7 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 	metadata := map[string]any{
 		ThinkingOriginalModelMetadataKey: modelName, // Lưu model name gốc từ request
 	}
-	
+
 	// Nếu có alias resolution, cũng lưu lại model đã resolved
 	if resolvedModel != modelName {
 		metadata["resolved_model"] = resolvedModel
@@ -446,4 +451,41 @@ func parseNumberToInt(raw any) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// ModelUsesThinkingLevels returns true if the model uses discrete thinking levels
+// (like OpenAI's reasoning_effort) instead of numeric budgets.
+// This is used to determine whether to convert effort strings to budgets.
+func ModelUsesThinkingLevels(model string) bool {
+	// OpenAI models use levels (reasoning_effort: low/medium/high)
+	// Claude and Gemini models use numeric budgets
+	lower := strings.ToLower(model)
+	if strings.HasPrefix(lower, "gpt-") || strings.HasPrefix(lower, "o1") || strings.HasPrefix(lower, "o3") {
+		return true
+	}
+	return false
+}
+
+// ThinkingEffortToBudget converts a reasoning effort level to a thinking budget.
+// Returns the budget value and true if conversion was successful.
+// Standard mapping:
+//   - none    → 0
+//   - auto    → -1
+//   - minimal → 512
+//   - low     → 1024
+//   - medium  → 8192
+//   - high    → 24576
+//   - xhigh   → 32768
+func ThinkingEffortToBudget(model string, effort string) (int, bool) {
+	levelToBudget := map[string]int{
+		"none":    0,
+		"auto":    -1,
+		"minimal": 512,
+		"low":     1024,
+		"medium":  8192,
+		"high":    24576,
+		"xhigh":   32768,
+	}
+	budget, ok := levelToBudget[strings.ToLower(strings.TrimSpace(effort))]
+	return budget, ok
 }

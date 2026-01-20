@@ -3,7 +3,6 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"sort"
 	"sync"
 	"time"
 )
@@ -16,7 +15,7 @@ type SignatureEntry struct {
 
 const (
 	// SignatureCacheTTL is how long signatures are valid
-	SignatureCacheTTL = 2 * time.Hour
+	SignatureCacheTTL = 3 * time.Hour
 
 	// MaxEntriesPerSession limits memory usage per session
 	MaxEntriesPerSession = 100
@@ -26,10 +25,16 @@ const (
 
 	// MinValidSignatureLen is the minimum length for a signature to be considered valid
 	MinValidSignatureLen = 50
+
+	// SessionCleanupInterval controls how often stale sessions are purged
+	SessionCleanupInterval = 10 * time.Minute
 )
 
 // signatureCache stores signatures by sessionId -> textHash -> SignatureEntry
 var signatureCache sync.Map
+
+// sessionCleanupOnce ensures the background cleanup goroutine starts only once
+var sessionCleanupOnce sync.Once
 
 // sessionCache is the inner map type
 type sessionCache struct {
@@ -45,12 +50,49 @@ func hashText(text string) string {
 
 // getOrCreateSession gets or creates a session cache
 func getOrCreateSession(sessionID string) *sessionCache {
+	// Start background cleanup on first access
+	sessionCleanupOnce.Do(startSessionCleanup)
+
 	if val, ok := signatureCache.Load(sessionID); ok {
 		return val.(*sessionCache)
 	}
 	sc := &sessionCache{entries: make(map[string]SignatureEntry)}
 	actual, _ := signatureCache.LoadOrStore(sessionID, sc)
 	return actual.(*sessionCache)
+}
+
+// startSessionCleanup launches a background goroutine that periodically
+// removes sessions where all entries have expired.
+func startSessionCleanup() {
+	go func() {
+		ticker := time.NewTicker(SessionCleanupInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			purgeExpiredSessions()
+		}
+	}()
+}
+
+// purgeExpiredSessions removes sessions with no valid (non-expired) entries.
+func purgeExpiredSessions() {
+	now := time.Now()
+	signatureCache.Range(func(key, value any) bool {
+		sc := value.(*sessionCache)
+		sc.mu.Lock()
+		// Remove expired entries
+		for k, entry := range sc.entries {
+			if now.Sub(entry.Timestamp) > SignatureCacheTTL {
+				delete(sc.entries, k)
+			}
+		}
+		isEmpty := len(sc.entries) == 0
+		sc.mu.Unlock()
+		// Remove session if empty
+		if isEmpty {
+			signatureCache.Delete(key)
+		}
+		return true
+	})
 }
 
 // CacheSignature stores a thinking signature for a given session and text.
@@ -68,43 +110,6 @@ func CacheSignature(sessionID, text, signature string) {
 
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-
-	// Evict expired entries if at capacity
-	if len(sc.entries) >= MaxEntriesPerSession {
-		now := time.Now()
-		for key, entry := range sc.entries {
-			if now.Sub(entry.Timestamp) > SignatureCacheTTL {
-				delete(sc.entries, key)
-			}
-		}
-		// If still at capacity, remove oldest entries
-		if len(sc.entries) >= MaxEntriesPerSession {
-			// Find and remove oldest quarter
-			oldest := make([]struct {
-				key string
-				ts  time.Time
-			}, 0, len(sc.entries))
-			for key, entry := range sc.entries {
-				oldest = append(oldest, struct {
-					key string
-					ts  time.Time
-				}{key, entry.Timestamp})
-			}
-			// Sort by timestamp (oldest first) using sort.Slice
-			sort.Slice(oldest, func(i, j int) bool {
-				return oldest[i].ts.Before(oldest[j].ts)
-			})
-
-			toRemove := len(oldest) / 4
-			if toRemove < 1 {
-				toRemove = 1
-			}
-
-			for i := 0; i < toRemove; i++ {
-				delete(sc.entries, oldest[i].key)
-			}
-		}
-	}
 
 	sc.entries[textHash] = SignatureEntry{
 		Signature: signature,
@@ -127,21 +132,24 @@ func GetCachedSignature(sessionID, text string) string {
 
 	textHash := hashText(text)
 
-	sc.mu.RLock()
-	entry, exists := sc.entries[textHash]
-	sc.mu.RUnlock()
+	now := time.Now()
 
+	sc.mu.Lock()
+	entry, exists := sc.entries[textHash]
 	if !exists {
+		sc.mu.Unlock()
 		return ""
 	}
-
-	// Check if expired
-	if time.Since(entry.Timestamp) > SignatureCacheTTL {
-		sc.mu.Lock()
+	if now.Sub(entry.Timestamp) > SignatureCacheTTL {
 		delete(sc.entries, textHash)
 		sc.mu.Unlock()
 		return ""
 	}
+
+	// Refresh TTL on access (sliding expiration).
+	entry.Timestamp = now
+	sc.entries[textHash] = entry
+	sc.mu.Unlock()
 
 	return entry.Signature
 }
