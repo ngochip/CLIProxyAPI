@@ -179,6 +179,9 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 		}
 	}
 
+	// Log thông tin token usage từ response
+	logClaudeTokenUsage(modelName, resp)
+
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -257,18 +260,31 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			}
 
 			// Continue streaming the rest
-			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
+			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, modelName, chunk)
 			return
 		}
 	}
 }
 
-func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
+func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage, modelName string, firstChunk []byte) {
+	// Tích lũy token usage từ streaming events
+	var inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens int64
+
+	// Parse token usage từ chunk đầu tiên (đã được write trước đó)
+	if len(firstChunk) > 0 {
+		parseStreamingTokenUsage(firstChunk, &inputTokens, &outputTokens, &cacheCreationInputTokens, &cacheReadInputTokens)
+	}
+
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
 			if len(chunk) == 0 {
 				return
 			}
+
+			// Parse streaming events để lấy token usage
+			// Format: "event: <type>\ndata: <json>\n\n"
+			parseStreamingTokenUsage(chunk, &inputTokens, &outputTokens, &cacheCreationInputTokens, &cacheReadInputTokens)
+
 			_, _ = c.Writer.Write(chunk)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
@@ -283,6 +299,14 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 
 			errorBytes, _ := json.Marshal(h.toClaudeError(errMsg))
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
+		},
+		WriteDone: func() {
+			// Log tổng token usage sau khi stream hoàn thành
+			if inputTokens > 0 || outputTokens > 0 {
+				totalTokens := inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens
+				log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.",
+					modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens)
+			}
 		},
 	})
 }
@@ -304,5 +328,65 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 			Type:    "api_error",
 			Message: msg.Error.Error(),
 		},
+	}
+}
+
+// logClaudeTokenUsage ghi log thông tin token usage từ response Claude
+// Response format: {"usage": {"input_tokens": N, "output_tokens": N, "cache_creation_input_tokens": N, "cache_read_input_tokens": N}}
+func logClaudeTokenUsage(modelName string, resp []byte) {
+	usage := gjson.GetBytes(resp, "usage")
+	if !usage.Exists() {
+		return
+	}
+
+	inputTokens := usage.Get("input_tokens").Int()
+	outputTokens := usage.Get("output_tokens").Int()
+	cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
+	cacheReadInputTokens := usage.Get("cache_read_input_tokens").Int()
+	totalTokens := inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens
+
+	log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.",
+		modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens)
+}
+
+// parseStreamingTokenUsage parse streaming events để tích lũy token usage
+// Claude streaming format:
+// - message_start: {"type":"message_start","message":{"usage":{"input_tokens":N,"cache_creation_input_tokens":N,"cache_read_input_tokens":N}}}
+// - message_delta: {"type":"message_delta","usage":{"output_tokens":N}}
+func parseStreamingTokenUsage(chunk []byte, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens *int64) {
+	// Chunk có thể chứa nhiều events, mỗi event có format:
+	// event: <type>\ndata: <json>\n\n
+	// Tìm tất cả "data:" lines và parse JSON
+	lines := bytes.Split(chunk, []byte("\n"))
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+
+		// Lấy phần JSON sau "data:"
+		jsonData := bytes.TrimSpace(line[5:])
+		if len(jsonData) == 0 {
+			continue
+		}
+
+		eventType := gjson.GetBytes(jsonData, "type").String()
+
+		switch eventType {
+		case "message_start":
+			// message_start chứa input tokens trong message.usage
+			usage := gjson.GetBytes(jsonData, "message.usage")
+			if usage.Exists() {
+				*inputTokens += usage.Get("input_tokens").Int()
+				*cacheCreationInputTokens += usage.Get("cache_creation_input_tokens").Int()
+				*cacheReadInputTokens += usage.Get("cache_read_input_tokens").Int()
+			}
+		case "message_delta":
+			// message_delta chứa output tokens trong usage
+			usage := gjson.GetBytes(jsonData, "usage")
+			if usage.Exists() {
+				*outputTokens += usage.Get("output_tokens").Int()
+			}
+		}
 	}
 }
