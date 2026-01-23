@@ -599,5 +599,112 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// with a thinking block (preceeding the lastmost set of tool_use and tool_result blocks)"
 	out = ensureAssistantThinkingBlock(out)
 
+	// Apply cache_control markers để tối ưu prompt caching
+	// Anthropic cho phép tối đa 4 breakpoints, đặt ở cuối các phần ổn định
+	out = applyCacheControlMarkers(out)
+
 	return []byte(out)
+}
+
+// applyCacheControlMarkers thêm cache_control markers vào request để tối ưu prompt caching
+// Anthropic prompt caching cho phép tối đa 4 breakpoints
+// Chiến lược đặt breakpoints:
+// 1. System instructions (cuối cùng) - ổn định nhất, ít thay đổi
+// 2. Tools array (cuối cùng) - thường không thay đổi giữa các requests
+// 3. Messages đầu tiên (user message đầu) - conversation history ổn định
+// 4. Messages cuối (user message cuối cùng trước assistant) - context gần nhất
+func applyCacheControlMarkers(requestJSON string) string {
+	cacheControl := map[string]string{"type": "ephemeral"}
+	breakpointsUsed := 0
+	const maxBreakpoints = 4
+
+	// Breakpoint 1: System instructions (cuối cùng)
+	// System thường là phần ổn định nhất, ít thay đổi giữa các requests
+	systemResult := gjson.Get(requestJSON, "system")
+	if systemResult.Exists() && systemResult.IsArray() {
+		systemArray := systemResult.Array()
+		if len(systemArray) > 0 && breakpointsUsed < maxBreakpoints {
+			lastIdx := len(systemArray) - 1
+			path := fmt.Sprintf("system.%d.cache_control", lastIdx)
+			requestJSON, _ = sjson.Set(requestJSON, path, cacheControl)
+			breakpointsUsed++
+		}
+	}
+
+	// Breakpoint 2: Tools array (cuối cùng)
+	// Tools declaration thường không thay đổi trong một session
+	toolsResult := gjson.Get(requestJSON, "tools")
+	if toolsResult.Exists() && toolsResult.IsArray() {
+		toolsArray := toolsResult.Array()
+		if len(toolsArray) > 0 && breakpointsUsed < maxBreakpoints {
+			lastIdx := len(toolsArray) - 1
+			path := fmt.Sprintf("tools.%d.cache_control", lastIdx)
+			requestJSON, _ = sjson.Set(requestJSON, path, cacheControl)
+			breakpointsUsed++
+		}
+	}
+
+	// Breakpoint 3 & 4: Messages
+	// Đặt cache_control ở các vị trí chiến lược trong message history
+	messagesResult := gjson.Get(requestJSON, "messages")
+	if messagesResult.Exists() && messagesResult.IsArray() {
+		messages := messagesResult.Array()
+		if len(messages) > 0 && breakpointsUsed < maxBreakpoints {
+			// Tìm các vị trí tốt để đặt breakpoint trong messages
+			// Ưu tiên: user messages với content dài hoặc ở vị trí chiến lược
+
+			// Chiến lược: đặt breakpoint ở user message cuối cùng trước assistant cuối
+			// Điều này giúp cache phần lớn conversation history
+			lastUserMsgIdx := -1
+			for i := len(messages) - 1; i >= 0; i-- {
+				role := messages[i].Get("role").String()
+				if role == "user" {
+					lastUserMsgIdx = i
+					break
+				}
+			}
+
+			if lastUserMsgIdx >= 0 && breakpointsUsed < maxBreakpoints {
+				// Đặt cache_control ở content block cuối của user message
+				content := messages[lastUserMsgIdx].Get("content")
+				if content.IsArray() {
+					contentArray := content.Array()
+					if len(contentArray) > 0 {
+						lastContentIdx := len(contentArray) - 1
+						path := fmt.Sprintf("messages.%d.content.%d.cache_control", lastUserMsgIdx, lastContentIdx)
+						requestJSON, _ = sjson.Set(requestJSON, path, cacheControl)
+						breakpointsUsed++
+					}
+				}
+			}
+
+			// Nếu còn breakpoint, đặt thêm ở user message đầu tiên (nếu khác với message cuối)
+			// Điều này giúp cache system context và initial user prompt
+			if breakpointsUsed < maxBreakpoints && len(messages) > 2 {
+				firstUserMsgIdx := -1
+				for i := 0; i < len(messages); i++ {
+					role := messages[i].Get("role").String()
+					if role == "user" {
+						firstUserMsgIdx = i
+						break
+					}
+				}
+
+				if firstUserMsgIdx >= 0 && firstUserMsgIdx != lastUserMsgIdx {
+					content := messages[firstUserMsgIdx].Get("content")
+					if content.IsArray() {
+						contentArray := content.Array()
+						if len(contentArray) > 0 {
+							lastContentIdx := len(contentArray) - 1
+							path := fmt.Sprintf("messages.%d.content.%d.cache_control", firstUserMsgIdx, lastContentIdx)
+							requestJSON, _ = sjson.Set(requestJSON, path, cacheControl)
+							breakpointsUsed++
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return requestJSON
 }
