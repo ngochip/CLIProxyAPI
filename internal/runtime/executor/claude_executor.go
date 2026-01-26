@@ -126,6 +126,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Ensure temperature = 1 when thinking is enabled
 	body = ensureTemperatureForThinking(body)
 
+	// Ensure all assistant messages have thinking blocks when thinking is enabled
+	// This prevents "assistant message must start with thinking block" errors
+	body = ensureAssistantHasThinkingBlock(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -263,6 +267,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Ensure temperature = 1 when thinking is enabled
 	body = ensureTemperatureForThinking(body)
+
+	// Ensure all assistant messages have thinking blocks when thinking is enabled
+	// This prevents "assistant message must start with thinking block" errors
+	body = ensureAssistantHasThinkingBlock(body)
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
@@ -538,6 +547,34 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	return betas, body
 }
 
+// ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.
+// Claude API requires max_tokens to be greater than budget_tokens for extended thinking.
+// If max_tokens is not set or too low, it adjusts to budget_tokens + default output allowance.
+func ensureMaxTokensForThinking(baseModel string, body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return body
+	}
+
+	budgetTokens := gjson.GetBytes(body, "thinking.budget_tokens").Int()
+	if budgetTokens <= 0 {
+		return body
+	}
+
+	maxTokens := gjson.GetBytes(body, "max_tokens").Int()
+
+	// Nếu max_tokens chưa được set hoặc <= budget_tokens, điều chỉnh
+	if maxTokens <= budgetTokens {
+		// Thêm 8192 tokens cho response (hoặc tối thiểu budget + 1024)
+		newMaxTokens := budgetTokens + 8192
+		if newMaxTokens < budgetTokens+1024 {
+			newMaxTokens = budgetTokens + 1024
+		}
+		body, _ = sjson.SetBytes(body, "max_tokens", newMaxTokens)
+	}
+	return body
+}
+
 // ensureTemperatureForThinking sets temperature = 1 when thinking is enabled.
 // Claude API requires temperature = 1 when extended thinking is enabled.
 // This function should be called after all thinking configuration is finalized.
@@ -561,6 +598,57 @@ func disableThinkingIfToolChoiceForced(body []byte) []byte {
 		// Remove thinking configuration entirely to avoid API error
 		body, _ = sjson.DeleteBytes(body, "thinking")
 	}
+	return body
+}
+
+// ensureAssistantHasThinkingBlock checks all assistant messages when thinking is enabled.
+// Claude API requires: "When thinking is enabled, a final assistant message must start with
+// a thinking block (preceeding the lastmost set of tool_use and tool_result blocks)"
+// If any assistant message is missing thinking block → disable thinking to avoid API error.
+func ensureAssistantHasThinkingBlock(body []byte) []byte {
+	thinkingType := gjson.GetBytes(body, "thinking.type").String()
+	if thinkingType != "enabled" {
+		return body
+	}
+
+	messagesResult := gjson.GetBytes(body, "messages")
+	if !messagesResult.IsArray() || len(messagesResult.Array()) == 0 {
+		return body
+	}
+
+	messages := messagesResult.Array()
+
+	// Scan ALL assistant messages - Claude requires thinking block in every assistant turn
+	for i := 0; i < len(messages); i++ {
+		if messages[i].Get("role").String() != "assistant" {
+			continue
+		}
+
+		content := messages[i].Get("content")
+
+		// Case 1: content là string → không có thinking block
+		if content.Type == gjson.String {
+			body, _ = sjson.DeleteBytes(body, "thinking")
+			return body
+		}
+
+		// Case 2: content không phải array hoặc empty
+		if !content.IsArray() || len(content.Array()) == 0 {
+			body, _ = sjson.DeleteBytes(body, "thinking")
+			return body
+		}
+
+		// Case 3: content là array, check phần tử đầu tiên
+		contentArray := content.Array()
+		firstContentType := contentArray[0].Get("type").String()
+
+		// Nếu không bắt đầu bằng thinking hoặc redacted_thinking → disable
+		if firstContentType != "thinking" && firstContentType != "redacted_thinking" {
+			body, _ = sjson.DeleteBytes(body, "thinking")
+			return body
+		}
+	}
+
 	return body
 }
 

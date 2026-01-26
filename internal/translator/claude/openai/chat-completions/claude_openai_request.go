@@ -63,42 +63,45 @@ func ensureAssistantThinkingBlock(requestJSON string) string {
 
 	messages := messagesResult.Array()
 
-	// Tìm assistant message cuối cùng
-	lastAssistantIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Get("role").String() == "assistant" {
-			lastAssistantIdx = i
-			break
+	// Scan TẤT CẢ assistant messages
+	// Khi thinking enabled, Claude yêu cầu mọi assistant turn đều phải có thinking block
+	for i := 0; i < len(messages); i++ {
+		if messages[i].Get("role").String() != "assistant" {
+			continue
+		}
+
+		content := messages[i].Get("content")
+
+		// Case 1: content là string (không phải array) → không có thinking block
+		if content.Type == gjson.String {
+			// String content không thể có thinking block
+			result, _ := sjson.Delete(requestJSON, "thinking")
+			// log.Warnf("⚠ Disabled thinking: assistant message %d has string content (no thinking block)", i)
+			return result
+		}
+
+		// Case 2: content không phải array hoặc empty
+		if !content.IsArray() || len(content.Array()) == 0 {
+			// Empty hoặc không phải array → không có thinking
+			result, _ := sjson.Delete(requestJSON, "thinking")
+			// log.Warnf("⚠ Disabled thinking: assistant message %d has empty/invalid content", i)
+			return result
+		}
+
+		// Case 3: content là array, check phần tử đầu tiên
+		contentArray := content.Array()
+		firstContentType := contentArray[0].Get("type").String()
+
+		// Nếu không bắt đầu bằng thinking hoặc redacted_thinking → disable
+		if firstContentType != "thinking" && firstContentType != "redacted_thinking" {
+			result, _ := sjson.Delete(requestJSON, "thinking")
+			// log.Warnf("⚠ Disabled thinking: assistant message %d starts with %s (expected thinking)", i, firstContentType)
+			return result
 		}
 	}
 
-	// Nếu không có assistant message, không cần fix
-	if lastAssistantIdx == -1 {
-		return requestJSON
-	}
-
-	// Kiểm tra content của assistant message cuối
-	lastAssistant := messages[lastAssistantIdx]
-	content := lastAssistant.Get("content")
-	if !content.IsArray() || len(content.Array()) == 0 {
-		return requestJSON
-	}
-
-	contentArray := content.Array()
-	firstContentType := contentArray[0].Get("type").String()
-
-	// Nếu đã bắt đầu bằng thinking hoặc redacted_thinking, OK
-	if firstContentType == "thinking" || firstContentType == "redacted_thinking" {
-		return requestJSON
-	}
-
-	// Nếu không có thinking block → Disable thinking tạm thời
-	// (Claude sẽ báo lỗi nếu thinking enabled mà không có thinking content)
-	result, _ := sjson.Delete(requestJSON, "thinking")
-
-	// log.Warnf("⚠ Disabled thinking for request (assistant message has no thinking block)")
-
-	return result
+	// Tất cả assistant messages đều có thinking block → OK
+	return requestJSON
 }
 
 // extractThinkingFromContent trích xuất thinking từ text content
@@ -113,7 +116,7 @@ func extractThinkingFromContent(text string) []interface{} {
 		entry := cache.GetCachedThinking(thinkingID)
 
 		// Nếu tìm thấy cache với valid signature → restore thinking block
-		if entry != nil && cache.HasValidSignature(entry.Signature) {
+		if entry != nil && cache.HasValidSignature("claude", entry.Signature) {
 			// Found valid cache → restore thinking
 			// log.Infof("✓ Restored cached thinking (thinkingID=%s, textLen=%d, sigLen=%d)",
 			// 	thinkingID, len(entry.ThinkingText), len(entry.Signature))

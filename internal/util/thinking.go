@@ -13,7 +13,7 @@ func ModelSupportsThinking(model string) bool {
 		return false
 	}
 	// First check the global dynamic registry
-	if info := registry.GetGlobalRegistry().GetModelInfo(model); info != nil {
+	if info := registry.GetGlobalRegistry().GetModelInfo(model, ""); info != nil {
 		return info.Thinking != nil
 	}
 	// Fallback: check static model definitions
@@ -73,7 +73,7 @@ func thinkingRangeFromRegistry(model string) (found bool, min int, max int, zero
 		return false, 0, 0, false, false
 	}
 	// First check global dynamic registry
-	if info := registry.GetGlobalRegistry().GetModelInfo(model); info != nil && info.Thinking != nil {
+	if info := registry.GetGlobalRegistry().GetModelInfo(model, ""); info != nil && info.Thinking != nil {
 		return true, info.Thinking.Min, info.Thinking.Max, info.Thinking.ZeroAllowed, info.Thinking.DynamicAllowed
 	}
 	// Fallback: check static model definitions
@@ -93,7 +93,7 @@ func GetModelThinkingLevels(model string) []string {
 	if model == "" {
 		return nil
 	}
-	info := registry.GetGlobalRegistry().GetModelInfo(model)
+	info := registry.GetGlobalRegistry().GetModelInfo(model, "")
 	if info == nil || info.Thinking == nil {
 		return nil
 	}
@@ -129,7 +129,7 @@ func IsOpenAICompatibilityModel(model string) bool {
 	if model == "" {
 		return false
 	}
-	info := registry.GetGlobalRegistry().GetModelInfo(model)
+	info := registry.GetGlobalRegistry().GetModelInfo(model, "")
 	if info == nil {
 		return false
 	}
