@@ -143,6 +143,7 @@ func captureRequestInfo(c *gin.Context) (*RequestInfo, error) {
 		Headers:   headers,
 		Body:      body,
 		RequestID: logging.GetGinRequestID(c),
+		Timestamp: time.Now(),
 	}, nil
 }
 
