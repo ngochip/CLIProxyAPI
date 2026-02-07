@@ -61,10 +61,7 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 	switch capability {
 	case CapabilityBudgetOnly:
 		if config.Mode == ModeLevel {
-			if config.Level == LevelAuto || config.Level == LevelMax {
-				// LevelAuto and LevelMax are handled below as ModeAuto conversions.
-				// Skip budget conversion to avoid losing the semantic meaning
-				// (LevelMax → ModeAuto + effort=max for DynamicAllowed models like Opus 4.6).
+			if config.Level == LevelAuto {
 				break
 			}
 			budget, ok := ConvertLevelToBudget(string(config.Level))
@@ -101,14 +98,6 @@ func ValidateConfig(config ThinkingConfig, modelInfo *registry.ModelInfo, fromFo
 		config.Budget = -1
 		config.Level = ""
 	}
-	// LevelMax → ModeAuto + giữ Level=max để applier biết cần set effort=max
-	// Opus 4.6: thinking.type=adaptive + output_config.effort=max
-	if config.Mode == ModeLevel && config.Level == LevelMax {
-		config.Mode = ModeAuto
-		config.Budget = -1
-		// Giữ Level = LevelMax (không clear) để Claude applier set output_config.effort=max
-	}
-	// ModeBudget with Budget=-1 is semantically ModeAuto (e.g., from ConvertLevelToBudget("max"))
 	if config.Mode == ModeBudget && config.Budget == -1 {
 		config.Mode = ModeAuto
 	}

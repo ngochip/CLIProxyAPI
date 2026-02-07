@@ -41,6 +41,18 @@ func GetClaudeModels() []*ModelInfo {
 			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true},
 		},
 		{
+			ID:                  "claude-opus-4-6-thinking",
+			Object:              "model",
+			Created:             1770318000, // 2026-02-05
+			OwnedBy:             "anthropic",
+			Type:                "claude",
+			DisplayName:         "Claude 4.6 Opus (Thinking)",
+			Description:         "Claude 4.6 Opus with adaptive thinking enabled by default",
+			ContextLength:       200000,
+			MaxCompletionTokens: 128000,
+			Thinking:            &ThinkingSupport{Min: 1024, Max: 128000, ZeroAllowed: true, DynamicAllowed: true},
+		},
+		{
 			ID:                  "claude-opus-4-5-20251101",
 			Object:              "model",
 			Created:             1761955200, // 2025-11-01

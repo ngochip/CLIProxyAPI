@@ -89,6 +89,7 @@ func getModelAliases() map[string]string {
 var thinkingModelAliases = map[string]string{
 	"claude-sonnet-4-5":  "claude-sonnet-4-5-20250929",
 	"claude-opus-4-5":    "claude-opus-4-5-20251101",
+	"claude-opus-4-6":    "claude-opus-4-6",
 	"claude-sonnet-4":    "claude-sonnet-4-20250514",
 	"claude-opus-4":      "claude-opus-4-20250514",
 	"claude-opus-4-1":    "claude-opus-4-1-20250805",

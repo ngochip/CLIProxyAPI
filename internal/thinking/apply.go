@@ -142,6 +142,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 			"mode":     config.Mode,
 			"budget":   config.Budget,
 			"level":    config.Level,
+			"effort":   config.Effort,
 		}).Debug("thinking: config from model suffix |")
 	} else {
 		config = extractThinkingConfig(body, providerFormat)
@@ -164,7 +165,18 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		return body, nil
 	}
 
-	// 5. Validate and normalize configuration
+	// 5a. Effort-only config: chỉ set output_config.effort, skip thinking validation
+	// Ví dụ: claude-opus-4-6(max) → effort=max, thinking giữ nguyên
+	if isEffortOnlyConfig(config) {
+		log.WithFields(log.Fields{
+			"provider": providerFormat,
+			"model":    modelInfo.ID,
+			"effort":   config.Effort,
+		}).Debug("thinking: effort-only config, applying without thinking change |")
+		return applier.Apply(body, config, modelInfo)
+	}
+
+	// 5b. Validate and normalize thinking configuration
 	validated, err := ValidateConfig(config, modelInfo, fromFormat, providerFormat, suffixResult.HasSuffix)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -193,6 +205,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		"mode":     validated.Mode,
 		"budget":   validated.Budget,
 		"level":    validated.Level,
+		"effort":   validated.Effort,
 	}).Debug("thinking: processed config to apply |")
 
 	// 6. Apply configuration using provider-specific applier
@@ -203,11 +216,18 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 //
 // Parsing priority:
 //  1. Special values: "none" → ModeNone, "auto"/"-1" → ModeAuto
-//  2. Level names: "minimal", "low", "medium", "high", "xhigh" → ModeLevel
-//  3. Numeric values: positive integers → ModeBudget, 0 → ModeNone
+//  2. Effort-only values: "max" → chỉ set Effort, KHÔNG bật thinking
+//  3. Level names: "minimal", "low", "medium", "high", "xhigh" → ModeLevel
+//  4. Numeric values: positive integers → ModeBudget, 0 → ModeNone
 //
 // If none of the above match, returns empty ThinkingConfig (treated as no config).
 func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
+	// 0. Handle compound suffix: "auto+max", "max+auto", etc.
+	// Format: "thinking_mode+effort" hoặc "effort+thinking_mode"
+	if strings.Contains(rawSuffix, "+") {
+		return parseCompoundSuffix(rawSuffix, provider, model)
+	}
+
 	// 1. Try special values first (none, auto, -1)
 	if mode, ok := ParseSpecialSuffix(rawSuffix); ok {
 		switch mode {
@@ -218,12 +238,18 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 		}
 	}
 
-	// 2. Try level parsing (minimal, low, medium, high, xhigh)
+	// 2. "max" → effort-only (KHÔNG bật thinking)
+	// Opus 4.6: "max" nghĩa là output_config.effort=max, thinking phải bật riêng
+	if isEffortOnlySuffix(rawSuffix) {
+		return ThinkingConfig{Effort: strings.ToLower(strings.TrimSpace(rawSuffix))}
+	}
+
+	// 3. Try level parsing (minimal, low, medium, high, xhigh)
 	if level, ok := ParseLevelSuffix(rawSuffix); ok {
 		return ThinkingConfig{Mode: ModeLevel, Level: level}
 	}
 
-	// 3. Try numeric parsing
+	// 4. Try numeric parsing
 	if budget, ok := ParseNumericSuffix(rawSuffix); ok {
 		if budget == 0 {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -238,6 +264,80 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 		"raw_suffix": rawSuffix,
 	}).Debug("thinking: unknown suffix format, treating as no config |")
 	return ThinkingConfig{}
+}
+
+// parseCompoundSuffix handles "effort+thinking" compound suffixes.
+// Ví dụ: "(max+auto)" → Effort="max" + Mode=ModeAuto (adaptive thinking)
+// Ví dụ: "(auto+max)" → same result
+// Ví dụ: "(high+auto)" → Effort="high" + Mode=ModeAuto
+func parseCompoundSuffix(rawSuffix, provider, model string) ThinkingConfig {
+	parts := strings.SplitN(rawSuffix, "+", 2)
+	if len(parts) != 2 {
+		return ThinkingConfig{}
+	}
+
+	config := ThinkingConfig{}
+	for _, part := range parts {
+		part = strings.ToLower(strings.TrimSpace(part))
+		if part == "" {
+			continue
+		}
+
+		// Check if part is a thinking mode (auto, none)
+		if mode, ok := ParseSpecialSuffix(part); ok {
+			switch mode {
+			case ModeNone:
+				config.Mode = ModeNone
+				config.Budget = 0
+			case ModeAuto:
+				config.Mode = ModeAuto
+				config.Budget = -1
+			}
+			continue
+		}
+
+		// Check if part is effort-only (max)
+		if isEffortOnlySuffix(part) {
+			config.Effort = part
+			continue
+		}
+
+		// Check if part is a thinking level
+		if level, ok := ParseLevelSuffix(part); ok {
+			// Trong compound suffix, level dùng như effort
+			config.Effort = string(level)
+			continue
+		}
+
+		// Check if part is numeric (budget)
+		if budget, ok := ParseNumericSuffix(part); ok {
+			config.Mode = ModeBudget
+			config.Budget = budget
+			continue
+		}
+	}
+
+	log.WithFields(log.Fields{
+		"provider":   provider,
+		"model":      model,
+		"raw_suffix": rawSuffix,
+		"mode":       config.Mode,
+		"effort":     config.Effort,
+		"budget":     config.Budget,
+	}).Debug("thinking: parsed compound suffix |")
+
+	return config
+}
+
+// isEffortOnlySuffix checks if suffix is an effort-only value (không phải thinking level).
+// "max" là effort-only vì nó chỉ set output_config.effort, không bật thinking.
+func isEffortOnlySuffix(rawSuffix string) bool {
+	return strings.EqualFold(rawSuffix, "max")
+}
+
+// isEffortOnlyConfig checks if config chỉ có Effort, không có thinking mode nào.
+func isEffortOnlyConfig(config ThinkingConfig) bool {
+	return config.Effort != "" && config.Mode == ModeBudget && config.Budget == 0 && config.Level == ""
 }
 
 // applyUserDefinedModel applies thinking configuration for user-defined models
@@ -332,7 +432,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 }
 
 func hasThinkingConfig(config ThinkingConfig) bool {
-	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != ""
+	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != "" || config.Effort != ""
 }
 
 // extractClaudeConfig extracts thinking configuration from Claude format request body.

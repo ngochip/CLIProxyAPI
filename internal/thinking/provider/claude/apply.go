@@ -71,6 +71,15 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
+	// Effort-only config: chỉ set output_config.effort, KHÔNG touch thinking
+	// Ví dụ: claude-opus-4-6(max) → effort=max, thinking giữ nguyên từ request
+	if isEffortOnly(config) {
+		if len(body) == 0 || !gjson.ValidBytes(body) {
+			body = []byte(`{}`)
+		}
+		return applyEffort(body, config), nil
+	}
+
 	// Xử lý ModeBudget, ModeNone, và ModeAuto (adaptive)
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
 		return body, nil
@@ -80,10 +89,11 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		body = []byte(`{}`)
 	}
 
-	// ModeNone → disabled
+	// ModeNone → disabled (nhưng vẫn có thể set effort)
 	if config.Mode == thinking.ModeNone || config.Budget == 0 {
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result = applyEffort(result, config)
 		return result, nil
 	}
 
@@ -92,11 +102,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	if config.Mode == thinking.ModeAuto && modelInfo.Thinking.DynamicAllowed {
 		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		// Nếu Level=max → set output_config.effort=max (combo mạnh nhất trên Opus 4.6)
-		// Các level khác (low, medium, high) cũng được map sang effort tương ứng
-		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
-		}
+		result = applyEffort(result, config)
 		return result, nil
 	}
 
@@ -109,7 +115,24 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	} else {
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 	}
+	result = applyEffort(result, config)
 	return result, nil
+}
+
+// isEffortOnly returns true khi config CHỈ có Effort, không có thinking mode nào.
+// Ví dụ: claude-opus-4-6(max) → Effort="max", Mode=0, Budget=0, Level=""
+func isEffortOnly(config thinking.ThinkingConfig) bool {
+	return config.Effort != "" && config.Mode == thinking.ModeBudget && config.Budget == 0 && config.Level == ""
+}
+
+// applyEffort sets output_config.effort nếu config.Effort được chỉ định.
+// Effort độc lập với thinking mode — có thể set effort mà không cần bật thinking.
+func applyEffort(body []byte, config thinking.ThinkingConfig) []byte {
+	if config.Effort == "" {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "output_config.effort", config.Effort)
+	return body
 }
 
 // normalizeClaudeBudget applies Claude-specific constraints to ensure max_tokens > budget_tokens.
@@ -170,31 +193,35 @@ func (a *Applier) effectiveMaxTokens(body []byte, modelInfo *registry.ModelInfo)
 // Với user-defined model, ModeAuto mặc định dùng "adaptive" (Opus 4.6+ style)
 // vì không có modelInfo để kiểm tra DynamicAllowed.
 func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte, error) {
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
-		return body, nil
-	}
-
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		body = []byte(`{}`)
+	}
+
+	// Effort-only: chỉ set effort, không touch thinking
+	if isEffortOnly(config) {
+		return applyEffort(body, config), nil
+	}
+
+	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
+		return body, nil
 	}
 
 	switch config.Mode {
 	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result = applyEffort(result, config)
 		return result, nil
 	case thinking.ModeAuto:
 		// User-defined model: dùng adaptive (Opus 4.6+ recommended)
 		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		// Nếu có Level (ví dụ max) → set output_config.effort
-		if config.Level != "" {
-			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
-		}
+		result = applyEffort(result, config)
 		return result, nil
 	default:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
+		result = applyEffort(result, config)
 		return result, nil
 	}
 }

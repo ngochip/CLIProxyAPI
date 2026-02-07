@@ -67,6 +67,9 @@ const (
 //   - ModeAuto: Budget=-1, Level is ignored
 //   - ModeBudget: Budget is a positive integer, Level is ignored
 //   - ModeLevel: Budget is ignored, Level is a valid level
+//
+// Effort is independent of thinking mode — it controls output_config.effort
+// (Claude API) which affects all output quality, not just thinking.
 type ThinkingConfig struct {
 	// Mode specifies the configuration mode
 	Mode ThinkingMode
@@ -75,6 +78,10 @@ type ThinkingConfig struct {
 	Budget int
 	// Level is the thinking level, only effective when Mode is ModeLevel
 	Level ThinkingLevel
+	// Effort controls output effort level independently of thinking mode.
+	// Ví dụ: "max", "high", "medium", "low" → map sang output_config.effort (Claude API).
+	// Effort KHÔNG bật thinking — nó chỉ ảnh hưởng chất lượng output.
+	Effort string
 }
 
 // SuffixResult represents the result of parsing a model name for thinking suffix.
