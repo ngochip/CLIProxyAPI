@@ -8,7 +8,9 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +36,9 @@ type ConvertAnthropicResponseToOpenAIParams struct {
 	ToolCallsAccumulator map[int]*ToolCallAccumulator
 	// Thinking accumulator for streaming
 	ThinkingAccumulator map[int]*ThinkingAccumulator
+	// Pre-built JSON fragments cho fast delta construction (tránh sjson.Set mỗi delta)
+	deltaPrefix string
+	deltaSuffix string
 }
 
 // ToolCallAccumulator holds the state for accumulating tool call data
@@ -79,7 +84,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 	root := gjson.ParseBytes(rawJSON)
 	eventType := root.Get("type").String()
 
-	// Base OpenAI streaming response template
+	// Fast path: content_block_delta là event xuất hiện nhiều nhất khi streaming.
+	// Xử lý trực tiếp không cần build JSON template để tránh overhead sjson.Set mỗi delta.
+	if eventType == "content_block_delta" {
+		return handleContentBlockDelta(root, (*param).(*ConvertAnthropicResponseToOpenAIParams))
+	}
+
+	// Base OpenAI streaming response template (chỉ build cho non-delta events)
 	template := `{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"response_metadata":{}},"finish_reason":null}]}`
 
 	// Set model
@@ -105,6 +116,15 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			template, _ = sjson.Set(template, "id", (*param).(*ConvertAnthropicResponseToOpenAIParams).ResponseID)
 			template, _ = sjson.Set(template, "model", modelName)
 			template, _ = sjson.Set(template, "created", (*param).(*ConvertAnthropicResponseToOpenAIParams).CreatedAt)
+
+			// Pre-build JSON fragments cho fast streaming delta construction
+			modelJSON, _ := json.Marshal(modelName)
+			pState := (*param).(*ConvertAnthropicResponseToOpenAIParams)
+			pState.deltaPrefix = `{"id":"` + pState.ResponseID +
+				`","object":"chat.completion.chunk","created":` + strconv.FormatInt(pState.CreatedAt, 10) +
+				`,"model":` + string(modelJSON) +
+				`,"choices":[{"index":0,"delta":{"content":`
+			pState.deltaSuffix = `,"response_metadata":{}},"finish_reason":null}]}`
 
 			// Set initial role to assistant for the response
 			template, _ = sjson.Set(template, "choices.0.delta.role", "assistant")
@@ -159,68 +179,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		}
 		return []string{}
 
-	case "content_block_delta":
-		// Handle content delta (text, tool use arguments, or reasoning content)
-		hasContent := false
-		if delta := root.Get("delta"); delta.Exists() {
-			deltaType := delta.Get("type").String()
-
-			switch deltaType {
-			case "text_delta":
-				// Text content delta - send incremental text updates
-				if text := delta.Get("text"); text.Exists() {
-					template, _ = sjson.Set(template, "choices.0.delta.content", text.String())
-					hasContent = true
-				}
-			case "thinking_delta":
-				// Stream reasoning/thinking content ngay lập tức
-				if thinking := delta.Get("thinking"); thinking.Exists() {
-					index := int(root.Get("index").Int())
-					// Lưu thinking text gốc (không escape) để cache
-					originalThinkingText := thinking.String()
-					// Escape ``` trong thinking để không break format khi hiển thị
-					//escapedThinkingText := strings.ReplaceAll(originalThinkingText, "```", "\\`\\`\\`")
-					if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
-						if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
-							// Lưu text gốc để cache signature đúng
-							accumulator.Thinking.WriteString(originalThinkingText)
-						}
-					}
-					// Stream escaped thinking delta để hiển thị
-					template, _ = sjson.Set(template, "choices.0.delta.content", originalThinkingText)
-					hasContent = true
-				}
-			case "signature_delta":
-				// Accumulate signature for thinking block
-				if signature := delta.Get("signature"); signature.Exists() {
-					index := int(root.Get("index").Int())
-					if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
-						if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
-							accumulator.Signature.WriteString(signature.String())
-						}
-					}
-				}
-				// Don't output signature delta
-				return []string{}
-			case "input_json_delta":
-				// Tool use input delta - accumulate arguments for tool calls
-				if partialJSON := delta.Get("partial_json"); partialJSON.Exists() {
-					index := int(root.Get("index").Int())
-					if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator != nil {
-						if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index]; exists {
-							accumulator.Arguments.WriteString(partialJSON.String())
-						}
-					}
-				}
-				// Don't output anything yet - wait for complete tool call
-				return []string{}
-			}
-		}
-		if hasContent {
-			return []string{template}
-		} else {
-			return []string{}
-		}
+	// content_block_delta: đã xử lý bởi fast-path handleContentBlockDelta() ở trên
 
 	case "content_block_stop":
 		// End of content block - output complete tool call if it's a tool_use block or thinking if it's a thinking block
@@ -321,6 +280,61 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 		// Unknown event type - ignore
 		return []string{}
 	}
+}
+
+// handleContentBlockDelta xử lý content_block_delta events với fast-path optimization.
+// Dùng pre-built JSON prefix/suffix + gjson Raw value để tránh sjson.Set overhead per delta.
+func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpenAIParams) []string {
+	delta := root.Get("delta")
+	if !delta.Exists() {
+		return []string{}
+	}
+
+	switch delta.Get("type").String() {
+	case "text_delta":
+		// Text content delta - gửi incremental text updates
+		if text := delta.Get("text"); text.Exists() {
+			if p.deltaPrefix != "" {
+				return []string{p.deltaPrefix + text.Raw + p.deltaSuffix}
+			}
+		}
+	case "thinking_delta":
+		// Thinking content delta - stream reasoning ngay lập tức
+		if thinking := delta.Get("thinking"); thinking.Exists() {
+			// Accumulate thinking text cho cache signature ở content_block_stop
+			index := int(root.Get("index").Int())
+			if p.ThinkingAccumulator != nil {
+				if acc, exists := p.ThinkingAccumulator[index]; exists {
+					acc.Thinking.WriteString(thinking.String())
+				}
+			}
+			// Dùng pre-built prefix/suffix + Raw JSON (đã escape sẵn) → zero-parse construction
+			if p.deltaPrefix != "" {
+				return []string{p.deltaPrefix + thinking.Raw + p.deltaSuffix}
+			}
+		}
+	case "signature_delta":
+		// Accumulate signature cho thinking block
+		if signature := delta.Get("signature"); signature.Exists() {
+			index := int(root.Get("index").Int())
+			if p.ThinkingAccumulator != nil {
+				if acc, exists := p.ThinkingAccumulator[index]; exists {
+					acc.Signature.WriteString(signature.String())
+				}
+			}
+		}
+	case "input_json_delta":
+		// Tool use input delta - accumulate arguments cho tool calls
+		if partialJSON := delta.Get("partial_json"); partialJSON.Exists() {
+			index := int(root.Get("index").Int())
+			if p.ToolCallsAccumulator != nil {
+				if acc, exists := p.ToolCallsAccumulator[index]; exists {
+					acc.Arguments.WriteString(partialJSON.String())
+				}
+			}
+		}
+	}
+	return []string{}
 }
 
 // mapAnthropicStopReasonToOpenAI maps Anthropic stop reasons to OpenAI stop reasons

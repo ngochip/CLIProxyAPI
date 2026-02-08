@@ -350,7 +350,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		return nil, err
 	}
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 64) // Buffer cho streaming performance - giảm back-pressure
 	stream = out
 	go func() {
 		defer close(out)

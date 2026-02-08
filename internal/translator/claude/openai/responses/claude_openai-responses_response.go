@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,13 +183,16 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		dt := d.Get("type").String()
 		if dt == "text_delta" {
 			if t := d.Get("text"); t.Exists() {
-				msg := `{"type":"response.output_text.delta","sequence_number":0,"item_id":"","output_index":0,"content_index":0,"delta":"","logprobs":[]}`
-				msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
-				msg, _ = sjson.Set(msg, "item_id", st.CurrentMsgID)
-				msg, _ = sjson.Set(msg, "delta", t.String())
-				out = append(out, emitEvent("response.output_text.delta", msg))
+				textStr := t.String()
+				// Direct JSON construction - tránh 3x sjson.Set overhead per delta
+				msg := `{"type":"response.output_text.delta","sequence_number":` +
+					strconv.Itoa(nextSeq()) +
+					`,"item_id":"` + st.CurrentMsgID +
+					`","output_index":0,"content_index":0,"delta":` + t.Raw +
+					`,"logprobs":[]}`
+				out = append(out, "event: response.output_text.delta\ndata: "+msg)
 				// aggregate text for response.output
-				st.TextBuf.WriteString(t.String())
+				st.TextBuf.WriteString(textStr)
 			}
 		} else if dt == "input_json_delta" {
 			idx := int(root.Get("index").Int())
@@ -197,23 +201,26 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 					st.FuncArgsBuf[idx] = &strings.Builder{}
 				}
 				st.FuncArgsBuf[idx].WriteString(pj.String())
-				msg := `{"type":"response.function_call_arguments.delta","sequence_number":0,"item_id":"","output_index":0,"delta":""}`
-				msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
-				msg, _ = sjson.Set(msg, "item_id", fmt.Sprintf("fc_%s", st.CurrentFCID))
-				msg, _ = sjson.Set(msg, "output_index", idx)
-				msg, _ = sjson.Set(msg, "delta", pj.String())
-				out = append(out, emitEvent("response.function_call_arguments.delta", msg))
+				// Direct JSON construction - tránh 4x sjson.Set overhead per delta
+				msg := `{"type":"response.function_call_arguments.delta","sequence_number":` +
+					strconv.Itoa(nextSeq()) +
+					`,"item_id":"fc_` + st.CurrentFCID +
+					`","output_index":` + strconv.Itoa(idx) +
+					`,"delta":` + pj.Raw + `}`
+				out = append(out, "event: response.function_call_arguments.delta\ndata: "+msg)
 			}
 		} else if dt == "thinking_delta" {
 			if st.ReasoningActive {
 				if t := d.Get("thinking"); t.Exists() {
-					st.ReasoningBuf.WriteString(t.String())
-					msg := `{"type":"response.reasoning_summary_text.delta","sequence_number":0,"item_id":"","output_index":0,"summary_index":0,"delta":""}`
-					msg, _ = sjson.Set(msg, "sequence_number", nextSeq())
-					msg, _ = sjson.Set(msg, "item_id", st.ReasoningItemID)
-					msg, _ = sjson.Set(msg, "output_index", st.ReasoningIndex)
-					msg, _ = sjson.Set(msg, "delta", t.String())
-					out = append(out, emitEvent("response.reasoning_summary_text.delta", msg))
+					thinkingText := t.String()
+					st.ReasoningBuf.WriteString(thinkingText)
+					// Direct JSON construction - tránh 4x sjson.Set overhead per delta
+					msg := `{"type":"response.reasoning_summary_text.delta","sequence_number":` +
+						strconv.Itoa(nextSeq()) +
+						`,"item_id":"` + st.ReasoningItemID +
+						`","output_index":` + strconv.Itoa(st.ReasoningIndex) +
+						`,"summary_index":0,"delta":` + t.Raw + `}`
+					out = append(out, "event: response.reasoning_summary_text.delta\ndata: "+msg)
 				}
 			}
 		}

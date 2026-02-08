@@ -500,7 +500,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, errChan
 	}
-	dataChan := make(chan []byte)
+	dataChan := make(chan []byte, 64) // Buffer cho streaming performance - giảm back-pressure
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
 		defer close(dataChan)
