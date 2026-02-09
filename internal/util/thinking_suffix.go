@@ -26,18 +26,34 @@ var (
 
 // defaultModelAliases chứa các alias mặc định khi không có config.
 var defaultModelAliases = map[string]string{
-	// Claude aliases với format khác
-	"claude-4.5-sonnet":               "claude-sonnet-4-5",
-	"claude-4.5-sonnet-thinking":      "claude-sonnet-4-5-thinking",
-	"claude-4.5-sonnet-thinking-low":  "claude-sonnet-4-5-thinking-low",
+	// Claude 4.5 Sonnet aliases
+	"claude-4.5-sonnet":                "claude-sonnet-4-5",
+	"claude-4.5-sonnet-thinking":       "claude-sonnet-4-5-thinking",
+	"claude-4.5-sonnet-thinking-low":   "claude-sonnet-4-5-thinking-low",
 	"claude-4.5-sonnet-thinking-medium": "claude-sonnet-4-5-thinking-medium",
-	"claude-4.5-sonnet-thinking-high": "claude-sonnet-4-5-thinking-high",
-	
-	"claude-4.5-opus":                 "claude-opus-4-5",
-	"claude-4.5-opus-thinking":        "claude-opus-4-5-thinking",
-	"claude-4.5-opus-thinking-low":    "claude-opus-4-5-thinking-low",
-	"claude-4.5-opus-thinking-medium": "claude-opus-4-5-thinking-medium",
-	"claude-4.5-opus-thinking-high":   "claude-opus-4-5-thinking-high",
+	"claude-4.5-sonnet-thinking-high":  "claude-sonnet-4-5-thinking-high",
+
+	// Claude 4.5 Opus aliases
+	"claude-4.5-opus":                  "claude-opus-4-5",
+	"claude-4.5-opus-thinking":         "claude-opus-4-5-thinking",
+	"claude-4.5-opus-thinking-low":     "claude-opus-4-5-thinking-low",
+	"claude-4.5-opus-thinking-medium":  "claude-opus-4-5-thinking-medium",
+	"claude-4.5-opus-thinking-high":    "claude-opus-4-5-thinking-high",
+
+	// Claude 4.6 Opus aliases (Cursor-compatible model names)
+	// Dạng cơ bản
+	"claude-4.6-opus":                      "claude-opus-4-6",
+	// Thinking variants → compound suffix (auto = adaptive thinking cho Opus 4.6)
+	"claude-4.6-opus-thinking":             "claude-opus-4-6(auto)",
+	"claude-4.6-opus-thinking-low":         "claude-opus-4-6(auto+low)",
+	"claude-4.6-opus-thinking-medium":      "claude-opus-4-6(auto+medium)",
+	"claude-4.6-opus-thinking-high":        "claude-opus-4-6(auto+high)",
+	// Max effort variants
+	"claude-4.6-opus-max-thinking":         "claude-opus-4-6(auto+max)",
+	// Fast mode variants (sẽ được strip -fast ở executor, nhưng có alias để safe)
+	"claude-4.6-opus-fast":                 "claude-opus-4-6(fast)",
+	"claude-4.6-opus-thinking-fast":        "claude-opus-4-6(auto+fast)",
+	"claude-4.6-opus-max-thinking-fast":    "claude-opus-4-6(auto+max+fast)",
 }
 
 // SetModelAliases cập nhật model aliases từ config.
@@ -155,8 +171,16 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 		return modelName, nil
 	}
 
+	// Bước 0: Strip -fast suffix (speed modifier, independent of thinking)
+	speedFast := false
+	workingName := modelName
+	if strings.HasSuffix(strings.ToLower(workingName), "-fast") {
+		speedFast = true
+		workingName = workingName[:len(workingName)-5]
+	}
+
 	// Bước 1: Giải quyết alias trước
-	resolvedModel := ResolveModelAlias(modelName)
+	resolvedModel := ResolveModelAlias(workingName)
 	baseModel := resolvedModel
 
 	var (
@@ -167,9 +191,9 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 
 	// Kiểm tra suffix -thinking trước
 	for _, ts := range thinkingSuffixes {
-		if strings.HasSuffix(strings.ToLower(modelName), ts.suffix) {
+		if strings.HasSuffix(strings.ToLower(workingName), ts.suffix) {
 			// Lấy base model prefix (phần trước suffix -thinking)
-			prefix := modelName[:len(modelName)-len(ts.suffix)]
+			prefix := workingName[:len(workingName)-len(ts.suffix)]
 
 			// Tìm mapping trong thinkingModelAliases
 			if actualModel, ok := thinkingModelAliases[strings.ToLower(prefix)]; ok {
@@ -188,19 +212,19 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 
 	// Match "(<value>)" pattern at the end of the model name
 	if !matched {
-		if idx := strings.LastIndex(modelName, "("); idx != -1 {
-			if !strings.HasSuffix(modelName, ")") {
+		if idx := strings.LastIndex(workingName, "("); idx != -1 {
+			if !strings.HasSuffix(workingName, ")") {
 				// Incomplete parenthesis, ignore
 				return baseModel, nil
 			}
 
-			value := modelName[idx+1 : len(modelName)-1] // Extract content between ( and )
+			value := workingName[idx+1 : len(workingName)-1] // Extract content between ( and )
 			if value == "" {
 				// Empty parentheses not supported
 				return baseModel, nil
 			}
 
-			candidateBase := modelName[:idx]
+			candidateBase := workingName[:idx]
 
 			// Auto-detect: pure numeric → budget, string → reasoning effort level
 			if parsed, ok := parseIntPrefix(value); ok {
@@ -220,7 +244,7 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 		}
 	}
 
-	if !matched {
+	if !matched && !speedFast {
 		return baseModel, nil
 	}
 
@@ -229,7 +253,7 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 	}
 	
 	// Nếu có alias resolution, cũng lưu lại model đã resolved
-	if resolvedModel != modelName {
+	if resolvedModel != workingName {
 		metadata["resolved_model"] = resolvedModel
 	}
 	if budgetOverride != nil {
@@ -237,6 +261,10 @@ func NormalizeThinkingModel(modelName string) (string, map[string]any) {
 	}
 	if reasoningEffort != nil {
 		metadata[ReasoningEffortMetadataKey] = *reasoningEffort
+	}
+	// Lưu speed modifier nếu có
+	if speedFast {
+		metadata["speed"] = "fast"
 	}
 	return baseModel, metadata
 }

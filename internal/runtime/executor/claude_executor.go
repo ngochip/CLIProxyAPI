@@ -87,7 +87,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	// Strip -fast suffix trước khi xử lý model name (speed modifier, independent of thinking)
+	modelForProcessing := req.Model
+	speedFast := stripFastSuffix(&modelForProcessing)
+
+	baseModel := thinking.ParseSuffix(modelForProcessing).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -109,7 +113,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, stream)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, modelForProcessing, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return resp, err
 	}
@@ -139,9 +143,21 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		body = ensureCacheControl(body)
 	}
 
+	// Apply fast mode: set "speed": "fast" nếu model suffix chứa -fast
+	// hoặc nếu thinking applier đã set speed trong body
+	if speedFast && gjson.GetBytes(body, "speed").String() != "fast" {
+		body, _ = sjson.SetBytes(body, "speed", "fast")
+	}
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+
+	// Ensure fast-mode beta header khi speed=fast được set (từ suffix hoặc body)
+	if speedFast || gjson.GetBytes(body, "speed").String() == "fast" {
+		extraBetas = ensureFastModeBeta(extraBetas)
+	}
+
 	bodyForTranslation := body
 	bodyForUpstream := body
 	if isClaudeOAuthToken(apiKey) {
@@ -241,7 +257,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	// Strip -fast suffix trước khi xử lý model name (speed modifier, independent of thinking)
+	modelForProcessing := req.Model
+	speedFast := stripFastSuffix(&modelForProcessing)
+
+	baseModel := thinking.ParseSuffix(modelForProcessing).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -261,7 +281,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
-	body, err = thinking.ApplyThinking(body, req.Model, from.String(), to.String(), e.Identifier())
+	body, err = thinking.ApplyThinking(body, modelForProcessing, from.String(), to.String(), e.Identifier())
 	if err != nil {
 		return nil, err
 	}
@@ -291,9 +311,20 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		body = ensureCacheControl(body)
 	}
 
+	// Apply fast mode: set "speed": "fast" nếu model suffix chứa -fast
+	if speedFast && gjson.GetBytes(body, "speed").String() != "fast" {
+		body, _ = sjson.SetBytes(body, "speed", "fast")
+	}
+
 	// Extract betas from body and convert to header
 	var extraBetas []string
 	extraBetas, body = extractAndRemoveBetas(body)
+
+	// Ensure fast-mode beta header khi speed=fast được set
+	if speedFast || gjson.GetBytes(body, "speed").String() == "fast" {
+		extraBetas = ensureFastModeBeta(extraBetas)
+	}
+
 	bodyForTranslation := body
 	bodyForUpstream := body
 	if isClaudeOAuthToken(apiKey) {
@@ -424,7 +455,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 }
 
 func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	// Strip -fast suffix (count_tokens không cần speed, nhưng cần base model đúng)
+	modelForProcessing := req.Model
+	stripFastSuffix(&modelForProcessing)
+	baseModel := thinking.ParseSuffix(modelForProcessing).ModelName
 
 	apiKey, baseURL := claudeCreds(auth)
 	if baseURL == "" {
@@ -544,6 +578,34 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now
 	return auth, nil
+}
+
+// fastModeBeta là tên beta header cần thiết cho fast mode (Opus 4.6+).
+const fastModeBeta = "fast-mode-2026-02-01"
+
+// stripFastSuffix kiểm tra và strip suffix "-fast" từ model name.
+// Trả về true nếu model name có chứa "-fast" suffix.
+// Model name được cập nhật in-place (bỏ suffix "-fast").
+func stripFastSuffix(model *string) bool {
+	if model == nil || *model == "" {
+		return false
+	}
+	if strings.HasSuffix(strings.ToLower(*model), "-fast") {
+		*model = (*model)[:len(*model)-5]
+		return true
+	}
+	return false
+}
+
+// ensureFastModeBeta đảm bảo fast-mode beta header có trong danh sách extraBetas.
+// Nếu đã có thì không thêm trùng.
+func ensureFastModeBeta(extraBetas []string) []string {
+	for _, b := range extraBetas {
+		if strings.TrimSpace(b) == fastModeBeta {
+			return extraBetas
+		}
+	}
+	return append(extraBetas, fastModeBeta)
 }
 
 // extractAndRemoveBetas extracts the "betas" array from the body and removes it.

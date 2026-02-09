@@ -71,13 +71,22 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return body, nil
 	}
 
+	// Speed-only config: chỉ set speed, KHÔNG touch thinking
+	// Ví dụ: claude-opus-4-6(fast) → speed=fast, thinking giữ nguyên từ request
+	if isSpeedOnly(config) {
+		if len(body) == 0 || !gjson.ValidBytes(body) {
+			body = []byte(`{}`)
+		}
+		return applySpeed(body, config), nil
+	}
+
 	// Effort-only config: chỉ set output_config.effort, KHÔNG touch thinking
 	// Ví dụ: claude-opus-4-6(max) → effort=max, thinking giữ nguyên từ request
 	if isEffortOnly(config) {
 		if len(body) == 0 || !gjson.ValidBytes(body) {
 			body = []byte(`{}`)
 		}
-		return applyEffort(body, config), nil
+		return applySpeed(applyEffort(body, config), config), nil
 	}
 
 	// Xử lý ModeBudget, ModeNone, và ModeAuto (adaptive)
@@ -89,11 +98,12 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		body = []byte(`{}`)
 	}
 
-	// ModeNone → disabled (nhưng vẫn có thể set effort)
+	// ModeNone → disabled (nhưng vẫn có thể set effort và speed)
 	if config.Mode == thinking.ModeNone || config.Budget == 0 {
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		result = applyEffort(result, config)
+		result = applySpeed(result, config)
 		return result, nil
 	}
 
@@ -103,6 +113,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		result = applyEffort(result, config)
+		result = applySpeed(result, config)
 		return result, nil
 	}
 
@@ -116,13 +127,31 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 	}
 	result = applyEffort(result, config)
+	result = applySpeed(result, config)
 	return result, nil
 }
 
-// isEffortOnly returns true khi config CHỈ có Effort, không có thinking mode nào.
+// isSpeedOnly returns true khi config CHỈ có Speed, không có thinking mode hay effort nào.
+// Ví dụ: claude-opus-4-6(fast) → Speed="fast", Mode=0, Budget=0, Level="", Effort=""
+func isSpeedOnly(config thinking.ThinkingConfig) bool {
+	return config.Speed != "" && config.Effort == "" && config.Mode == thinking.ModeBudget && config.Budget == 0 && config.Level == ""
+}
+
+// isEffortOnly returns true khi config CHỈ có Effort (và có thể có Speed), không có thinking mode nào.
 // Ví dụ: claude-opus-4-6(max) → Effort="max", Mode=0, Budget=0, Level=""
 func isEffortOnly(config thinking.ThinkingConfig) bool {
 	return config.Effort != "" && config.Mode == thinking.ModeBudget && config.Budget == 0 && config.Level == ""
+}
+
+// applySpeed sets "speed" top-level field nếu config.Speed được chỉ định.
+// Speed độc lập với thinking mode — có thể set speed mà không cần bật thinking.
+// Fast mode (Opus 4.6+): tăng output tokens per second lên đến 2.5x.
+func applySpeed(body []byte, config thinking.ThinkingConfig) []byte {
+	if config.Speed == "" {
+		return body
+	}
+	body, _ = sjson.SetBytes(body, "speed", config.Speed)
+	return body
 }
 
 // applyEffort sets output_config.effort nếu config.Effort được chỉ định.
@@ -197,13 +226,18 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 		body = []byte(`{}`)
 	}
 
-	// Effort-only: chỉ set effort, không touch thinking
+	// Speed-only: chỉ set speed, không touch thinking
+	if isSpeedOnly(config) {
+		return applySpeed(body, config), nil
+	}
+
+	// Effort-only: chỉ set effort + speed, không touch thinking
 	if isEffortOnly(config) {
-		return applyEffort(body, config), nil
+		return applySpeed(applyEffort(body, config), config), nil
 	}
 
 	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
-		return body, nil
+		return applySpeed(body, config), nil
 	}
 
 	switch config.Mode {
@@ -211,17 +245,20 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		result = applyEffort(result, config)
+		result = applySpeed(result, config)
 		return result, nil
 	case thinking.ModeAuto:
 		// User-defined model: dùng adaptive (Opus 4.6+ recommended)
 		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 		result = applyEffort(result, config)
+		result = applySpeed(result, config)
 		return result, nil
 	default:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
 		result = applyEffort(result, config)
+		result = applySpeed(result, config)
 		return result, nil
 	}
 }

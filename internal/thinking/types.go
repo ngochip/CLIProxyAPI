@@ -82,6 +82,11 @@ type ThinkingConfig struct {
 	// Ví dụ: "max", "high", "medium", "low" → map sang output_config.effort (Claude API).
 	// Effort KHÔNG bật thinking — nó chỉ ảnh hưởng chất lượng output.
 	Effort string
+	// Speed controls inference speed mode (Claude Opus 4.6+ only).
+	// Giá trị "fast" kích hoạt fast mode → thêm "speed": "fast" vào request body
+	// và beta header "fast-mode-2026-02-01".
+	// Fast mode tăng tốc output tokens per second lên đến 2.5x.
+	Speed string
 }
 
 // SuffixResult represents the result of parsing a model name for thinking suffix.

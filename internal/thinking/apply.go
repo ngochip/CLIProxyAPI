@@ -166,7 +166,18 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		return body, nil
 	}
 
-	// 5a. Effort-only config: chỉ set output_config.effort, skip thinking validation
+	// 5a. Speed-only config: chỉ set speed, skip thinking validation
+	// Ví dụ: claude-opus-4-6(fast) → speed=fast, thinking giữ nguyên
+	if isSpeedOnlyConfig(config) {
+		log.WithFields(log.Fields{
+			"provider": providerFormat,
+			"model":    modelInfo.ID,
+			"speed":    config.Speed,
+		}).Debug("thinking: speed-only config, applying without thinking change |")
+		return applier.Apply(body, config, modelInfo)
+	}
+
+	// 5b. Effort-only config: chỉ set output_config.effort, skip thinking validation
 	// Ví dụ: claude-opus-4-6(max) → effort=max, thinking giữ nguyên
 	if isEffortOnlyConfig(config) {
 		log.WithFields(log.Fields{
@@ -177,7 +188,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		return applier.Apply(body, config, modelInfo)
 	}
 
-	// 5b. Validate and normalize thinking configuration
+	// 5c. Validate and normalize thinking configuration
 	validated, err := ValidateConfig(config, modelInfo, fromFormat, providerFormat, suffixResult.HasSuffix)
 	if err != nil {
 		log.WithFields(log.Fields{
@@ -200,6 +211,11 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		return body, nil
 	}
 
+	// Preserve Speed từ config gốc (ValidateConfig không xử lý Speed)
+	if config.Speed != "" && validated.Speed == "" {
+		validated.Speed = config.Speed
+	}
+
 	log.WithFields(log.Fields{
 		"provider": providerFormat,
 		"model":    modelInfo.ID,
@@ -207,6 +223,7 @@ func ApplyThinking(body []byte, model string, fromFormat string, toFormat string
 		"budget":   validated.Budget,
 		"level":    validated.Level,
 		"effort":   validated.Effort,
+		"speed":    validated.Speed,
 	}).Debug("thinking: processed config to apply |")
 
 	// 6. Apply configuration using provider-specific applier
@@ -239,18 +256,24 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 		}
 	}
 
-	// 2. "max" → effort-only (KHÔNG bật thinking)
+	// 2. "fast" → speed-only (KHÔNG ảnh hưởng thinking)
+	// Opus 4.6: "fast" nghĩa là speed=fast, thinking giữ nguyên
+	if isSpeedSuffix(rawSuffix) {
+		return ThinkingConfig{Speed: strings.ToLower(strings.TrimSpace(rawSuffix))}
+	}
+
+	// 3. "max" → effort-only (KHÔNG bật thinking)
 	// Opus 4.6: "max" nghĩa là output_config.effort=max, thinking phải bật riêng
 	if isEffortOnlySuffix(rawSuffix) {
 		return ThinkingConfig{Effort: strings.ToLower(strings.TrimSpace(rawSuffix))}
 	}
 
-	// 3. Try level parsing (minimal, low, medium, high, xhigh)
+	// 4. Try level parsing (minimal, low, medium, high, xhigh)
 	if level, ok := ParseLevelSuffix(rawSuffix); ok {
 		return ThinkingConfig{Mode: ModeLevel, Level: level}
 	}
 
-	// 4. Try numeric parsing
+	// 5. Try numeric parsing
 	if budget, ok := ParseNumericSuffix(rawSuffix); ok {
 		if budget == 0 {
 			return ThinkingConfig{Mode: ModeNone, Budget: 0}
@@ -297,6 +320,12 @@ func parseCompoundSuffix(rawSuffix, provider, model string) ThinkingConfig {
 			continue
 		}
 
+		// Check if part is speed modifier (fast)
+		if isSpeedSuffix(part) {
+			config.Speed = part
+			continue
+		}
+
 		// Check if part is effort-only (max)
 		if isEffortOnlySuffix(part) {
 			config.Effort = part
@@ -324,10 +353,17 @@ func parseCompoundSuffix(rawSuffix, provider, model string) ThinkingConfig {
 		"raw_suffix": rawSuffix,
 		"mode":       config.Mode,
 		"effort":     config.Effort,
+		"speed":      config.Speed,
 		"budget":     config.Budget,
 	}).Debug("thinking: parsed compound suffix |")
 
 	return config
+}
+
+// isSpeedSuffix checks if suffix is a speed modifier.
+// "fast" kích hoạt fast mode (Opus 4.6+): speed="fast" + beta header fast-mode-2026-02-01.
+func isSpeedSuffix(rawSuffix string) bool {
+	return strings.EqualFold(rawSuffix, "fast")
 }
 
 // isEffortOnlySuffix checks if suffix is an effort-only value (không phải thinking level).
@@ -336,9 +372,14 @@ func isEffortOnlySuffix(rawSuffix string) bool {
 	return strings.EqualFold(rawSuffix, "max")
 }
 
-// isEffortOnlyConfig checks if config chỉ có Effort, không có thinking mode nào.
+// isEffortOnlyConfig checks if config chỉ có Effort (và có thể có Speed), không có thinking mode nào.
 func isEffortOnlyConfig(config ThinkingConfig) bool {
 	return config.Effort != "" && config.Mode == ModeBudget && config.Budget == 0 && config.Level == ""
+}
+
+// isSpeedOnlyConfig checks if config CHỈ có Speed, không có thinking mode hay effort nào.
+func isSpeedOnlyConfig(config ThinkingConfig) bool {
+	return config.Speed != "" && config.Effort == "" && config.Mode == ModeBudget && config.Budget == 0 && config.Level == ""
 }
 
 // applyUserDefinedModel applies thinking configuration for user-defined models
@@ -436,7 +477,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 }
 
 func hasThinkingConfig(config ThinkingConfig) bool {
-	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != "" || config.Effort != ""
+	return config.Mode != ModeBudget || config.Budget != 0 || config.Level != "" || config.Effort != "" || config.Speed != ""
 }
 
 // extractClaudeConfig extracts thinking configuration from Claude format request body.
