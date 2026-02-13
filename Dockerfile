@@ -8,6 +8,8 @@ RUN go mod download
 
 COPY . .
 
+RUN go mod tidy
+
 ARG VERSION=dev
 ARG COMMIT=none
 ARG BUILD_DATE=unknown
