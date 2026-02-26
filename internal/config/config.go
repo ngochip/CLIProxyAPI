@@ -132,6 +132,11 @@ type ClaudeHeaderDefaults struct {
 	PackageVersion string `yaml:"package-version" json:"package-version"`
 	RuntimeVersion string `yaml:"runtime-version" json:"runtime-version"`
 	Timeout        string `yaml:"timeout" json:"timeout"`
+	
+	// FilterContext1M controls whether to strip context-1m-2025-08-07 from client requests.
+	// When true, the beta flag is removed to avoid extra usage charges from Anthropic.
+	// When false (default), the beta flag is forwarded as-is from the client.
+	FilterContext1M bool `yaml:"filter-context-1m" json:"filter-context-1m"`
 }
 
 // TLSConfig holds HTTPS server settings.

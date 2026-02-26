@@ -831,7 +831,7 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 
 var excludedBetaPrefixes = []string{}
 
-func filterExcludedBetas(betas string) string {
+func filterExcludedBetas(betas string, cfg *config.Config) string {
 	parts := strings.Split(betas, ",")
 	var filtered []string
 	for _, beta := range parts {
@@ -839,6 +839,12 @@ func filterExcludedBetas(betas string) string {
 		if beta == "" {
 			continue
 		}
+		
+		// Filter context-1m if enabled in config
+		if cfg != nil && cfg.ClaudeHeaderDefaults.FilterContext1M && beta == "context-1m-2025-08-07" {
+			continue
+		}
+		
 		excluded := false
 		for _, prefix := range excludedBetaPrefixes {
 			if strings.HasPrefix(beta, prefix) {
@@ -916,7 +922,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27," + promptCachingBeta + "," + promptCachingScopeBeta + ",effort-2025-11-24,adaptive-thinking-2026-01-28"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		// Filter loại bỏ các beta không mong muốn
-		val = filterExcludedBetas(val)
+		val = filterExcludedBetas(val, cfg)
 		if val != "" {
 			baseBetas = val
 		}
