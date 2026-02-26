@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -69,6 +71,7 @@ func main() {
 	// Command-line flags to control the application's behavior.
 	var login bool
 	var codexLogin bool
+	var codexDeviceLogin bool
 	var claudeLogin bool
 	var qwenLogin bool
 	var iflowLogin bool
@@ -81,10 +84,13 @@ func main() {
 	var vertexImport string
 	var configPath string
 	var password string
+	var tuiMode bool
+	var standalone bool
 
 	// Define command-line flags for different operation modes.
 	flag.BoolVar(&login, "login", false, "Login Google Account")
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
+	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
 	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
@@ -97,6 +103,8 @@ func main() {
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
+	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
+	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -474,6 +482,9 @@ func main() {
 	} else if codexLogin {
 		// Handle Codex login
 		cmd.DoCodexLogin(cfg, options)
+	} else if codexDeviceLogin {
+		// Handle Codex device-code login
+		cmd.DoCodexDeviceLogin(cfg, options)
 	} else if claudeLogin {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
@@ -492,8 +503,83 @@ func main() {
 			cmd.WaitForCloudDeploy()
 			return
 		}
-		// Start the main proxy service
-		managementasset.StartAutoUpdater(context.Background(), configFilePath)
-		cmd.StartService(cfg, configFilePath, password)
+		if tuiMode {
+			if standalone {
+				// Standalone mode: start an embedded local server and connect TUI client to it.
+				managementasset.StartAutoUpdater(context.Background(), configFilePath)
+				hook := tui.NewLogHook(2000)
+				hook.SetFormatter(&logging.LogFormatter{})
+				log.AddHook(hook)
+
+				origStdout := os.Stdout
+				origStderr := os.Stderr
+				origLogOutput := log.StandardLogger().Out
+				log.SetOutput(io.Discard)
+
+				devNull, errOpenDevNull := os.Open(os.DevNull)
+				if errOpenDevNull == nil {
+					os.Stdout = devNull
+					os.Stderr = devNull
+				}
+
+				restoreIO := func() {
+					os.Stdout = origStdout
+					os.Stderr = origStderr
+					log.SetOutput(origLogOutput)
+					if devNull != nil {
+						_ = devNull.Close()
+					}
+				}
+
+				localMgmtPassword := fmt.Sprintf("tui-%d-%d", os.Getpid(), time.Now().UnixNano())
+				if password == "" {
+					password = localMgmtPassword
+				}
+
+				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+
+				client := tui.NewClient(cfg.Port, password)
+				ready := false
+				backoff := 100 * time.Millisecond
+				for i := 0; i < 30; i++ {
+					if _, errGetConfig := client.GetConfig(); errGetConfig == nil {
+						ready = true
+						break
+					}
+					time.Sleep(backoff)
+					if backoff < time.Second {
+						backoff = time.Duration(float64(backoff) * 1.5)
+					}
+				}
+
+				if !ready {
+					restoreIO()
+					cancel()
+					<-done
+					fmt.Fprintf(os.Stderr, "TUI error: embedded server is not ready\n")
+					return
+				}
+
+				if errRun := tui.Run(cfg.Port, password, hook, origStdout); errRun != nil {
+					restoreIO()
+					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+				} else {
+					restoreIO()
+				}
+
+				cancel()
+				<-done
+			} else {
+				// Default TUI mode: pure management client.
+				// The proxy server must already be running.
+				if errRun := tui.Run(cfg.Port, password, nil, os.Stdout); errRun != nil {
+					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
+				}
+			}
+		} else {
+			// Start the main proxy service
+			managementasset.StartAutoUpdater(context.Background(), configFilePath)
+			cmd.StartService(cfg, configFilePath, password)
+		}
 	}
 }

@@ -448,8 +448,6 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 							}
 
 						case "image":
-							// Hỗ trợ nhận ảnh base64 trực tiếp theo format Claude native
-							// Request format: {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
 							source := part.Get("source")
 							if source.Exists() && source.Get("type").String() == "base64" {
 								imagePart := `{"type":"image","source":{"type":"base64","media_type":"","data":""}}`
@@ -458,17 +456,29 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 								msg, _ = sjson.SetRaw(msg, "content.-1", imagePart)
 							}
 
+						case "file":
+							fileData := part.Get("file.file_data").String()
+							if strings.HasPrefix(fileData, "data:") {
+								semicolonIdx := strings.Index(fileData, ";")
+								commaIdx := strings.Index(fileData, ",")
+								if semicolonIdx != -1 && commaIdx != -1 && commaIdx > semicolonIdx {
+									mediaType := strings.TrimPrefix(fileData[:semicolonIdx], "data:")
+									data := fileData[commaIdx+1:]
+									docPart := `{"type":"document","source":{"type":"base64","media_type":"","data":""}}`
+									docPart, _ = sjson.Set(docPart, "source.media_type", mediaType)
+									docPart, _ = sjson.Set(docPart, "source.data", data)
+									msg, _ = sjson.SetRaw(msg, "content.-1", docPart)
+								}
+							}
+
 						case "tool_use":
-							// Handle tool use messages conversion
 							toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
 							toolUse, _ = sjson.Set(toolUse, "id", part.Get("id").String())
 							toolUse, _ = sjson.Set(toolUse, "name", part.Get("name").String())
 							toolUse, _ = sjson.SetRaw(toolUse, "input", part.Get("input").Raw)
-
 							msg, _ = sjson.SetRaw(msg, "content.-1", toolUse)
 
 						case "tool_result":
-							// Handle tool result messages conversion
 							toolResult := `{"type":"tool_result","tool_use_id":"","content":""}`
 							toolResult, _ = sjson.Set(toolResult, "tool_use_id", part.Get("tool_use_id").String())
 							toolResult, _ = sjson.Set(toolResult, "content", part.Get("content").String())

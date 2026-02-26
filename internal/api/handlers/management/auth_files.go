@@ -808,6 +808,87 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
+// PatchAuthFileFields updates editable fields (prefix, proxy_url, priority) of an auth file.
+func (h *Handler) PatchAuthFileFields(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name     string  `json:"name"`
+		Prefix   *string `json:"prefix"`
+		ProxyURL *string `json:"proxy_url"`
+		Priority *int    `json:"priority"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Find auth by name or ID
+	var targetAuth *coreauth.Auth
+	if auth, ok := h.authManager.GetByID(name); ok {
+		targetAuth = auth
+	} else {
+		auths := h.authManager.List()
+		for _, auth := range auths {
+			if auth.FileName == name {
+				targetAuth = auth
+				break
+			}
+		}
+	}
+
+	if targetAuth == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+		return
+	}
+
+	changed := false
+	if req.Prefix != nil {
+		targetAuth.Prefix = *req.Prefix
+		changed = true
+	}
+	if req.ProxyURL != nil {
+		targetAuth.ProxyURL = *req.ProxyURL
+		changed = true
+	}
+	if req.Priority != nil {
+		if targetAuth.Metadata == nil {
+			targetAuth.Metadata = make(map[string]any)
+		}
+		if *req.Priority == 0 {
+			delete(targetAuth.Metadata, "priority")
+		} else {
+			targetAuth.Metadata["priority"] = *req.Priority
+		}
+		changed = true
+	}
+
+	if !changed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	targetAuth.UpdatedAt = time.Now()
+
+	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
 func (h *Handler) disableAuth(ctx context.Context, id string) {
 	if h == nil || h.authManager == nil {
 		return
@@ -864,11 +945,17 @@ func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (s
 	if store == nil {
 		return "", fmt.Errorf("token store unavailable")
 	}
+	if h.postAuthHook != nil {
+		if err := h.postAuthHook(ctx, record); err != nil {
+			return "", fmt.Errorf("post-auth hook failed: %w", err)
+		}
+	}
 	return store.Save(ctx, record)
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Claude authentication...")
 
@@ -1013,6 +1100,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 
 func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 	proxyHTTPClient := util.SetProxy(&h.cfg.SDKConfig, &http.Client{})
 	ctx = context.WithValue(ctx, oauth2.HTTPClient, proxyHTTPClient)
 
@@ -1271,6 +1359,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -1416,6 +1505,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Antigravity authentication...")
 
@@ -1580,6 +1670,7 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 
 func (h *Handler) RequestQwenToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Qwen authentication...")
 
@@ -1635,6 +1726,7 @@ func (h *Handler) RequestQwenToken(c *gin.Context) {
 
 func (h *Handler) RequestKimiToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing Kimi authentication...")
 
@@ -1711,6 +1803,7 @@ func (h *Handler) RequestKimiToken(c *gin.Context) {
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
 
 	fmt.Println("Initializing iFlow authentication...")
 
@@ -2330,4 +2423,13 @@ func (h *Handler) GetAuthStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "wait"})
+}
+
+// PopulateAuthContext extracts request info and adds it to the context
+func PopulateAuthContext(ctx context.Context, c *gin.Context) context.Context {
+	info := &coreauth.RequestInfo{
+		Query:   c.Request.URL.Query(),
+		Headers: c.Request.Header,
+	}
+	return coreauth.WithRequestInfo(ctx, info)
 }

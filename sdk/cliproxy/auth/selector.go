@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strconv"
@@ -134,6 +135,62 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+func authWebsocketsEnabled(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if len(auth.Attributes) > 0 {
+		if raw := strings.TrimSpace(auth.Attributes["websockets"]); raw != "" {
+			parsed, errParse := strconv.ParseBool(raw)
+			if errParse == nil {
+				return parsed
+			}
+		}
+	}
+	if len(auth.Metadata) == 0 {
+		return false
+	}
+	raw, ok := auth.Metadata["websockets"]
+	if !ok || raw == nil {
+		return false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case string:
+		parsed, errParse := strconv.ParseBool(strings.TrimSpace(v))
+		if errParse == nil {
+			return parsed
+		}
+	default:
+	}
+	return false
+}
+
+func preferCodexWebsocketAuths(ctx context.Context, provider string, available []*Auth) []*Auth {
+	if len(available) == 0 {
+		return available
+	}
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) {
+		return available
+	}
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return available
+	}
+
+	wsEnabled := make([]*Auth, 0, len(available))
+	for i := 0; i < len(available); i++ {
+		candidate := available[i]
+		if authWebsocketsEnabled(candidate) {
+			wsEnabled = append(wsEnabled, candidate)
+		}
+	}
+	if len(wsEnabled) > 0 {
+		return wsEnabled
+	}
+	return available
+}
+
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
@@ -192,14 +249,17 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 }
 
 // Pick selects the next available auth for the provider in a round-robin manner.
+// For gemini-cli virtual auths (identified by the gemini_virtual_parent attribute),
+// a two-level round-robin is used: first cycling across credential groups (parent
+// accounts), then cycling within each group's project auths.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	_ = ctx
 	_ = opts
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
@@ -209,30 +269,96 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 	if limit <= 0 {
 		limit = 4096
 	}
-	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
-		s.cursors = make(map[string]int)
-	}
-	index := s.cursors[key]
 
+	// Check if any available auth has gemini_virtual_parent attribute,
+	// indicating gemini-cli virtual auths that should use credential-level polling.
+	groups, parentOrder := groupByVirtualParent(available)
+	if len(parentOrder) > 1 {
+		// Two-level round-robin: first select a credential group, then pick within it.
+		groupKey := key + "::group"
+		s.ensureCursorKey(groupKey, limit)
+		if _, exists := s.cursors[groupKey]; !exists {
+			// Seed with a random initial offset so the starting credential is randomized.
+			s.cursors[groupKey] = rand.IntN(len(parentOrder))
+		}
+		groupIndex := s.cursors[groupKey]
+		if groupIndex >= 2_147_483_640 {
+			groupIndex = 0
+		}
+		s.cursors[groupKey] = groupIndex + 1
+
+		selectedParent := parentOrder[groupIndex%len(parentOrder)]
+		group := groups[selectedParent]
+
+		// Second level: round-robin within the selected credential group.
+		innerKey := key + "::cred:" + selectedParent
+		s.ensureCursorKey(innerKey, limit)
+		innerIndex := s.cursors[innerKey]
+		if innerIndex >= 2_147_483_640 {
+			innerIndex = 0
+		}
+		s.cursors[innerKey] = innerIndex + 1
+		s.mu.Unlock()
+		return group[innerIndex%len(group)], nil
+	}
+
+	// Flat round-robin for non-grouped auths (original behavior).
+	s.ensureCursorKey(key, limit)
+	index := s.cursors[key]
 	if index >= 2_147_483_640 {
 		index = 0
 	}
-
 	s.cursors[key] = index + 1
 	s.mu.Unlock()
-	// log.Debugf("available: %d, index: %d, key: %d", len(available), index, index%len(available))
 	return available[index%len(available)], nil
+}
+
+// ensureCursorKey ensures the cursor map has capacity for the given key.
+// Must be called with s.mu held.
+func (s *RoundRobinSelector) ensureCursorKey(key string, limit int) {
+	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
+		s.cursors = make(map[string]int)
+	}
+}
+
+// groupByVirtualParent groups auths by their gemini_virtual_parent attribute.
+// Returns a map of parentID -> auths and a sorted slice of parent IDs for stable iteration.
+// Only auths with a non-empty gemini_virtual_parent are grouped; if any auth lacks
+// this attribute, nil/nil is returned so the caller falls back to flat round-robin.
+func groupByVirtualParent(auths []*Auth) (map[string][]*Auth, []string) {
+	if len(auths) == 0 {
+		return nil, nil
+	}
+	groups := make(map[string][]*Auth)
+	for _, a := range auths {
+		parent := ""
+		if a.Attributes != nil {
+			parent = strings.TrimSpace(a.Attributes["gemini_virtual_parent"])
+		}
+		if parent == "" {
+			// Non-virtual auth present; fall back to flat round-robin.
+			return nil, nil
+		}
+		groups[parent] = append(groups[parent], a)
+	}
+	// Collect parent IDs in sorted order for stable cursor indexing.
+	parentOrder := make([]string, 0, len(groups))
+	for p := range groups {
+		parentOrder = append(parentOrder, p)
+	}
+	sort.Strings(parentOrder)
+	return groups, parentOrder
 }
 
 // Pick selects the first available auth for the provider in a deterministic manner.
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
-	_ = ctx
 	_ = opts
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
 }
 
