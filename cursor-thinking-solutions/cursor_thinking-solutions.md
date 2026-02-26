@@ -841,3 +841,210 @@ Bạn restart server và test xem Cursor server có convert `reasoning_content` 
 
 tôi vừa restart server nhưng có vẻ thinking content không hiển thị mà bị strips mất luôn
 
+---
+
+**Cursor**
+
+<think>
+reasoning_content approach failed. Cursor server does not map reasoning_content to thinking_part in protobuf for custom models. The field is simply ignored/stripped. Need to move to Approach 2: patching the Cursor client directly.
+</think>
+```plaintext:thinkId:patch-approach-decision```
+`reasoning_content` approach không work — Cursor server bỏ qua field này cho custom models. Chuyển sang Approach 2: Patch Cursor client.
+
+**Plan:**
+1. Tìm `handleTextDelta` trong workbench.desktop.main.js
+2. Thêm logic detect `<think>` tags → redirect sang `handleThinkingDelta`
+3. Update checksum trong product.json
+4. Tạo script tự động để re-apply sau mỗi lần Cursor update
+
+---
+
+**User**
+
+ok, implement đi
+
+---
+
+**Cursor**
+
+<think>
+Implementation plan:
+1. Find unique pattern for handleTextDelta in workbench
+2. Create patched version that:
+   - Detects <think> opening tag → activates thinking mode
+   - Routes thinking content to handleThinkingDelta
+   - Detects </think> closing tag → calls handleThinkingCompleted
+   - Routes text after </think> back to normal handleTextDelta
+3. Create patch-cursor-thinking.js script with backup/restore/checksum update
+</think>
+```plaintext:thinkId:patch-v1-implementation```
+Tạo patch script `patch-cursor-thinking.js`:
+
+**Search pattern (unique):**
+```
+handleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolCalls()
+```
+
+**Patch v1 logic:**
+- Thêm `__thinkTagState` object: `{active, startTime, buf}`
+- Khi detect `<think>` → activate thinking, route content qua `handleThinkingDelta`
+- Khi detect `</think>` → gọi `handleThinkingCompleted` với duration
+- Text trước `<think>` và sau `</think>` → route qua `_origHandleTextDelta`
+- Backup files trước khi patch, update SHA-256 checksum trong product.json
+
+**Kết quả Patch v1:** Thinking block **hiển thị native UI** — collapsible, có duration, expandable. Nhưng thinking block thứ 2/3 trong conversation đôi khi chỉ hiển thị "Thinking" animation mà **không có text content**.
+
+---
+
+**User**
+
+tại sao đôi lúc Cursor chỉ hiển thị "Thinking" (có animation bóng bóng của Cursor) mà không hiển thị cụ thể text thinking là gì. check giúp tôi xem tại sao. nó thường xảy ra với thinking thứ 2 hoặc thứ 3 trong conversation
+
+---
+
+**Cursor**
+
+<think>
+Deep investigation vào root cause:
+
+1. Examined handleThinkingDelta: tạo bubble synchronously qua S_() (SolidJS batch). Reuse bubble nếu lastBubble.capabilityType === THINKING.
+
+2. Examined handleThinkingCompleted: bail-out nếu getLastBubble().capabilityType !== THINKING → thinkingDurationMs KHÔNG được set → thinking block NOT expandable.
+
+3. Examined PKp (thinkingWordStreamer): timer-based word streamer, supports re-enqueue sau flush(). Không cần tạo instance mới.
+
+4. Examined thinking UI render (hnc function): expandable = true CHỈ KHI thinkingDurationMs > 0. Nếu handleThinkingCompleted bail-out → thinking block hiển thị "Thought briefly" nhưng KHÔNG thể expand.
+
+Root cause analysis:
+
+A. Tag boundary split: </think> có thể bị split across SSE deltas (e.g., "</thi" + "nk>"). Patch v1 không buffer partial tags → handleThinkingCompleted không bao giờ fire → thinking block stuck ở loading state.
+
+B. _after text routing: Text sau </think> đi qua _origHandleTextDelta (bypass) → nếu có nested <think> tags → không detect được.
+
+C. Timing: handleThinkingCompleted gọi synchronous → getLastBubble() check có thể race với S_() batch trong handleThinkingDelta.
+</think>
+```plaintext:thinkId:root-cause-analysis```
+
+**Root Causes tìm được:**
+
+**A. Tag boundary split across SSE deltas:**
+Cursor server re-chunk data khi convert SSE → protobuf. `</think>` tag có thể bị split: `</thi` ở delta 1, `nk>` ở delta 2. Patch v1 không buffer partial tags → closing tag không bao giờ match → `handleThinkingCompleted` không fire → thinking block stuck ở loading state, **không có duration → không expandable**.
+
+**B. Recursive _after handling:**
+Text sau `</think>` route qua `_origHandleTextDelta` (bypass patch logic). Nếu response chứa nhiều thinking blocks liên tiếp, nested `<think>` tags sau `</think>` không được detect.
+
+**C. Deferred completion timing:**
+`handleThinkingCompleted` check `getLastBubble().capabilityType === THINKING`. Nếu timing không đúng → bail-out → `thinkingDurationMs` không set → thinking block hiển thị "Thought briefly" nhưng **không thể expand** dù text đã có trong store.
+
+**Key discovery:**
+- `thinkingDurationMs` PHẢI > 0 để thinking block expandable
+- `S_()` = SolidJS `batch()` → SYNCHRONOUS, nhưng word streamer là timer-based → text hiện sau
+- Handler class (`vLe`) tạo MỘT LẦN cho toàn bộ agent loop → `__thinkTagState` persist across turns
+
+---
+
+**Cursor** (tiếp)
+
+<think>
+Implement v2 fixes:
+Fix A: Buffer partial tags at delta boundaries
+Fix B: Route _after text through handleTextDelta (recursive) instead of _origHandleTextDelta
+Fix C: Use queueMicrotask for handleThinkingCompleted to ensure S_() batch completes first
+</think>
+```plaintext:thinkId:patch-v2-implementation```
+
+**Patch v2 - Fixes:**
+
+**Fix A - Tag boundary buffering:**
+```javascript
+// Buffer partial tags ở cuối text
+for (let _k = Math.max(0, _txt.length-7); _k < _txt.length; _k++) {
+  if ("</think>".startsWith(_txt.substring(_k))) {
+    _s.buf = _txt.substring(_k);  // Save partial tag
+    _txt = _txt.substring(0, _k);  // Remove from current processing
+    break;
+  }
+}
+// Next delta: _txt = _s.buf + n (prepend buffer)
+```
+
+**Fix B - Recursive _after:**
+```javascript
+// Text sau </think> route qua handleTextDelta (detect nested tags)
+const _after = _txt.substring(_ci + 8);
+const _self = this;
+queueMicrotask(() => {
+  _self.handleThinkingCompleted({thinkingDurationMs: _dur});
+  if (_after.length > 0) _self.handleTextDelta(_after);  // ← recursive, not _origHandleTextDelta
+});
+```
+
+**Fix C - Deferred completion:**
+```javascript
+// queueMicrotask đảm bảo S_() batch đã chạy
+queueMicrotask(() => {
+  _self.handleThinkingCompleted({thinkingDurationMs: _dur});
+  // ...
+});
+```
+
+**Unit tests (10 tests, all passed):** Cover tag splitting, nesting, no-tag scenarios, multiple blocks.
+
+**Kết quả Patch v2:** Tất cả thinking blocks (1st, 2nd, 3rd+) hiển thị đúng — có text content, expandable, đúng duration.
+
+---
+
+## Phát hiện thêm: Sub-agent Credentials Bug
+
+Trong quá trình debug, phát hiện thêm bug: sub-agents (Task tool) **KHÔNG** kế thừa custom OpenAI base URL và API key từ parent conversation.
+
+**Root cause:** `_runSubagent` tạo model details thiếu credentials:
+```javascript
+// BUG: chỉ có modelName và maxMode, thiếu apiKey, openaiApiBaseUrl
+const u = new Xf({modelName: e.modelId, maxMode: !1});
+```
+
+**Fix:** Tạo `patch-cursor-subagent-credentials.js` riêng — inject credentials từ parent model:
+```javascript
+new Xf({
+  modelName: e.modelId, maxMode: !1,
+  ...(()=>{
+    try {
+      const _d = this._aiService.getModelDetails({specificModelField:"composer"});
+      return {
+        apiKey: _d?.apiKey,
+        openaiApiBaseUrl: _d?.openaiApiBaseUrl,
+        azureState: _d?.azureState,
+        bedrockState: _d?.bedrockState
+      };
+    } catch(_e) { return {}; }
+  })()
+})
+```
+
+---
+
+## Tổng kết Solutions
+
+| File | Mục đích |
+|------|----------|
+| `patch-cursor-thinking.js` | Patch handleTextDelta: `<think>` tags → native thinking UI |
+| `patch-cursor-subagent-credentials.js` | Patch _runSubagent: inherit parent credentials cho sub-agents |
+| `README.md` | Index doc với quick start, re-apply workflow |
+| `CURSOR-ARCHITECTURE.md` | Cursor internals reference (protobuf, services, patching guide) |
+
+**Apply patches:**
+```bash
+node cursor-thinking-solutions/patch-cursor-thinking.js
+node cursor-thinking-solutions/patch-cursor-subagent-credentials.js
+# Restart Cursor (Cmd+Q → reopen)
+```
+
+**Restore:**
+```bash
+node cursor-thinking-solutions/patch-cursor-thinking.js --restore
+node cursor-thinking-solutions/patch-cursor-subagent-credentials.js --restore
+```
+
+**Khi Cursor update:** Xóa backup cũ → verify patterns → re-apply patches. Xem chi tiết tại `README.md` mục "Khi Cursor Update".
+

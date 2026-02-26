@@ -113,13 +113,29 @@ if (count !== 1) {
 }
 
 /**
- * Patch strategy:
- * - Track __thinkTagState: {active, startTime} per instance
- * - Detect <think> in text → switch sang handleThinkingDelta
- * - Detect </think> → call handleThinkingCompleted với thời gian thinking thực tế
- * - Text trước <think> và sau </think> vẫn qua handleTextDelta bình thường
+ * Patch strategy (v2 - fixes thinking block display issues):
+ *
+ * State: __thinkTagState = {active, startTime, buf}
+ *   - active: đang trong thinking block
+ *   - startTime: thời điểm bắt đầu thinking (cho duration)
+ *   - buf: buffer cho partial <think>/<\/think> tags bị split across SSE deltas
+ *
+ * Flow:
+ *   1. Prepend buffer từ delta trước (xử lý tag split)
+ *   2. Nếu KHÔNG active:
+ *      - Tìm <think> → gửi text trước qua _origHandleTextDelta, activate thinking
+ *      - Không tìm thấy → check partial tag ở cuối text, buffer nếu có
+ *   3. Nếu active (đang trong thinking):
+ *      - Tìm </think> → gửi thinking content qua handleThinkingDelta
+ *        → queueMicrotask: handleThinkingCompleted + recursive handleTextDelta cho _after
+ *      - Không tìm thấy → check partial tag ở cuối, buffer nếu có
+ *
+ * Fixes so với v1:
+ *   A. Tag boundary buffering: <think>/<\/think> bị split across deltas
+ *   B. Recursive _after: text sau </think> qua handleTextDelta (detect nested tags)
+ *   C. queueMicrotask: đảm bảo S_() batch đã chạy trước handleThinkingCompleted
  */
-const PATCHED = `handleTextDelta(n){if(n.length===0)return;if(!this.__thinkTagState)this.__thinkTagState={active:false,startTime:0};const _s=this.__thinkTagState;let _txt=n;if(!_s.active){const _oi=_txt.indexOf("<think>");if(_oi!==-1){const _before=_txt.substring(0,_oi);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.startTime=Date.now();_txt=_txt.substring(_oi+7);if(_txt.length===0)return;}}if(_s.active){const _ci=_txt.indexOf("</think>");if(_ci!==-1){const _thinkPart=_txt.substring(0,_ci);if(_thinkPart.length>0)this.handleThinkingDelta(_thinkPart);const _dur=Math.max(1000,Date.now()-_s.startTime);this.handleThinkingCompleted({thinkingDurationMs:_dur});_s.active=false;_s.startTime=0;const _after=_txt.substring(_ci+8);if(_after.length>0)this._origHandleTextDelta(_after);return;}this.handleThinkingDelta(_txt);return;}this._origHandleTextDelta(_txt)}_origHandleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolCalls()`;
+const PATCHED = `handleTextDelta(n){if(n.length===0)return;if(!this.__thinkTagState)this.__thinkTagState={active:false,startTime:0,buf:""};const _s=this.__thinkTagState;let _txt=_s.buf+n;_s.buf="";if(!_s.active){const _oi=_txt.indexOf("<think>");if(_oi!==-1){const _before=_txt.substring(0,_oi);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.startTime=Date.now();_txt=_txt.substring(_oi+7);if(_txt.length===0)return;}else{for(let _k=Math.max(0,_txt.length-6);_k<_txt.length;_k++){if("<think>".startsWith(_txt.substring(_k))){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}if(_txt.length>0)this._origHandleTextDelta(_txt);return;}}if(_s.active){const _ci=_txt.indexOf("</think>");if(_ci!==-1){const _thinkPart=_txt.substring(0,_ci);if(_thinkPart.length>0)this.handleThinkingDelta(_thinkPart);const _dur=Math.max(1000,Date.now()-_s.startTime);_s.active=false;_s.startTime=0;const _after=_txt.substring(_ci+8);const _self=this;queueMicrotask(()=>{_self.handleThinkingCompleted({thinkingDurationMs:_dur});if(_after.length>0)_self.handleTextDelta(_after);});return;}for(let _k=Math.max(0,_txt.length-7);_k<_txt.length;_k++){if("</think>".startsWith(_txt.substring(_k))){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}if(_txt.length>0)this.handleThinkingDelta(_txt);return;}this._origHandleTextDelta(_txt)}_origHandleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolCalls()`;
 
 console.log("🔧 Patching handleTextDelta...");
 const patched = data.replace(ORIGINAL, PATCHED);
