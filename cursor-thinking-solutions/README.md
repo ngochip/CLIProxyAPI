@@ -34,7 +34,9 @@ node cursor-thinking-solutions/patch-cursor-subagent-credentials.js --restore
 **v2 fixes (2026-02-22):** Thinking block thứ 2/3 đôi khi chỉ hiển thị "Thinking" animation mà không hiển thị text content. Root causes và fixes:
 - **Fix A - Tag boundary buffering:** `<think>` hoặc `</think>` có thể bị split across SSE deltas khi Cursor server re-chunk protobuf. Patch v2 buffer partial tags và ghép lại ở delta tiếp theo.
 - **Fix B - Recursive _after handling:** Text sau `</think>` giờ route qua `handleTextDelta` (thay vì `_origHandleTextDelta`) để detect nested `<think>` tags trong cùng delta.
-- **Fix C - Deferred completion:** `handleThinkingCompleted` được gọi qua `queueMicrotask` để đảm bảo thinking bubble đã được append vào conversation trước khi check `getLastBubble`.
+
+**v3 fixes (2026-02-26):** Thinking trong Exploring groups không hiển thị content, thẻ Exploring bị mất:
+- **Fix C - Synchronous completion:** Bỏ `queueMicrotask`, gọi `handleThinkingCompleted` đồng bộ. Root cause: khi Cursor server batch nhiều protobuf events (text-delta + tool-call-started), microtask chạy SAU tool-call-started → `getLastBubble()` trả về tool call bubble thay vì thinking → bail out → `thinkingDurationMs` không set → UI không expandable. `S_()` (SolidJS batch) là synchronous nên không cần defer.
 
 **Yêu cầu phía proxy:** Stream thinking qua `<think>...</think>` tags trong `delta.content`:
 ```
