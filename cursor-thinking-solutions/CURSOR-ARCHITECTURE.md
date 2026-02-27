@@ -703,6 +703,7 @@ Khi Cursor auto-update, workbench file bị thay thế → tất cả patches m�
 | Patch v3 (Patch A): Bỏ queueMicrotask → synchronous completion | **WORKS** | Fix thinking trong Exploring groups, thinkingDurationMs luôn được set |
 | Patch v4 (Patch B): Fix thinking render → show content during loading | **WORKS** | Fix stuck loading: content hiển thị real-time khi thinking đang chạy |
 | Sub-agent inherit parent credentials | Patch riêng | `_runSubagent` tạo Xf object thiếu credentials |
+| Summarize inherit parent credentials | Patch riêng | `summarize()` tạo Zf object thiếu credentials → "Slow Pool Error" |
 
 ### Chi tiết Patch v2 Fixes
 
@@ -745,6 +746,35 @@ Patched:  f = !m && !t && (e === void 0 || e <= 0) && r <= 0
 
 Khi `t=true` (loading): `!t = false` → `f = false` → `v = s` → content hiển thị real-time.
 Khi `t=false` (completed): `!t = true` → behavior giữ nguyên như cũ.
+
+### Summarize Credentials Bug (Patch D)
+
+**Root cause:** `summarize()` method tạo model details (Zf) chỉ với `modelName`, thiếu `apiKey`/`openaiApiBaseUrl`. Khi Cursor cố summarize chat content, request đi qua Cursor server thay vì custom proxy → `"Slow Pool Error: Claude 4.6 Opus is not currently enabled in the slow pool"`.
+
+```javascript
+// BUG (trong summarize method):
+credentials:this.convertModelDetailsToCredentials(new Zf({modelName:u.modelConfig?.modelName}))
+// → Zf object thiếu apiKey → convertModelDetailsToCredentials trả về {case: void 0}
+// → Request đi qua Cursor server → "Slow Pool Error"
+
+// FIX (inject credentials từ aiService):
+credentials:this.convertModelDetailsToCredentials(new Zf({
+  modelName:u.modelConfig?.modelName,
+  ...(()=>{
+    try {
+      const _d = this.aiService.getModelDetails({specificModelField:"composer"});
+      return {
+        apiKey: _d?.apiKey,
+        openaiApiBaseUrl: _d?.openaiApiBaseUrl,
+        azureState: _d?.azureState,
+        bedrockState: _d?.bedrockState
+      };
+    } catch(_e) { return {}; }
+  })()
+}))
+```
+
+**Lưu ý:** Summarize method dùng `this.aiService` (không có underscore), khác với SubagentComposerService dùng `this._aiService` (có underscore).
 
 ---
 
