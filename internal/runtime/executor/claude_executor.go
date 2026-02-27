@@ -201,10 +201,21 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+		if isPromptTooLongError(b) {
+			errText := gjson.GetBytes(b, "error.message").String()
+			if errText == "" {
+				errText = "prompt is too long"
+			}
+			syntheticData := buildSyntheticClaudeResponse(baseModel, errText)
+			var param any
+			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, syntheticData, &param)
+			resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+			return resp, nil
+		}
+		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 	decodedBody, err := decodeResponseBody(httpResp.Body, httpResp.Header.Get("Content-Encoding"))
@@ -250,7 +261,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		data,
 		&param,
 	)
-	resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
+	resp = cliproxyexecutor.Response{Payload: scaleUsageForContextLimit([]byte(out)), Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -371,6 +382,35 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("response body close error: %v", errClose)
 		}
+		if isPromptTooLongError(b) {
+			errText := gjson.GetBytes(b, "error.message").String()
+			if errText == "" {
+				errText = "prompt is too long"
+			}
+			errText += "\n<summarize></summarize>"
+			out := make(chan cliproxyexecutor.StreamChunk)
+			go func() {
+				defer close(out)
+				sseLines := buildSyntheticClaudeStreamLines(baseModel, errText)
+				if from == to {
+					for _, line := range sseLines {
+						cloned := make([]byte, len(line)+1)
+						copy(cloned, line)
+						cloned[len(line)] = '\n'
+						out <- cliproxyexecutor.StreamChunk{Payload: cloned}
+					}
+				} else {
+					var param any
+					for _, line := range sseLines {
+						chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, bodyForTranslation, bytes.Clone(line), &param)
+						for i := range chunks {
+							out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+						}
+					}
+				}
+			}()
+			return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+		}
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
@@ -404,7 +444,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 				}
-				// Forward the line as-is to preserve SSE format
+				line = scaleUsageForContextLimit(line)
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
 				cloned[len(line)] = '\n'
@@ -442,7 +482,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				&param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}
+				out <- cliproxyexecutor.StreamChunk{Payload: scaleUsageForContextLimit([]byte(chunks[i]))}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -839,12 +879,12 @@ func filterExcludedBetas(betas string, cfg *config.Config) string {
 		if beta == "" {
 			continue
 		}
-		
+
 		// Filter context-1m if enabled in config
 		if cfg != nil && cfg.ClaudeHeaderDefaults.FilterContext1M && beta == "context-1m-2025-08-07" {
 			continue
 		}
-		
+
 		excluded := false
 		for _, prefix := range excludedBetaPrefixes {
 			if strings.HasPrefix(beta, prefix) {
@@ -1648,4 +1688,97 @@ func injectSystemCacheControl(payload []byte) []byte {
 	}
 
 	return payload
+}
+
+// isPromptTooLongError checks if the Claude API error indicates a "prompt is too long" error.
+func isPromptTooLongError(body []byte) bool {
+	msg := gjson.GetBytes(body, "error.message").String()
+	return strings.Contains(msg, "prompt is too long")
+}
+
+// buildSyntheticClaudeResponse creates a synthetic non-streaming Claude API response
+// to return 200 to client when upstream returns "prompt is too long".
+func buildSyntheticClaudeResponse(model string, errMsg string) []byte {
+	return []byte(fmt.Sprintf(
+		`{"id":"msg_synthetic_prompt_too_long","type":"message","role":"assistant","content":[{"type":"text","text":%q}],"model":%q,"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":1}}`,
+		errMsg, model,
+	))
+}
+
+// buildSyntheticClaudeStreamLines creates synthetic SSE lines (Claude streaming format)
+// to return 200 streaming response to client when upstream returns "prompt is too long".
+func buildSyntheticClaudeStreamLines(model string, errMsg string) [][]byte {
+	return [][]byte{
+		[]byte(`event: message_start`),
+		[]byte(fmt.Sprintf(`data: {"type":"message_start","message":{"id":"msg_synthetic_prompt_too_long","type":"message","role":"assistant","content":[],"model":%q,"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}`, model)),
+		[]byte(``),
+		[]byte(`event: content_block_start`),
+		[]byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`),
+		[]byte(``),
+		[]byte(`event: content_block_delta`),
+		[]byte(fmt.Sprintf(`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":%q}}`, errMsg)),
+		[]byte(``),
+		[]byte(`event: content_block_stop`),
+		[]byte(`data: {"type":"content_block_stop","index":0}`),
+		[]byte(``),
+		[]byte(`event: message_delta`),
+		[]byte(`data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}`),
+		[]byte(``),
+		[]byte(`event: message_stop`),
+		[]byte(`data: {"type":"message_stop"}`),
+		[]byte(``),
+	}
+}
+
+const (
+	proxyMaxContext    = 200000
+	cursorPerceivedMax = 1000000
+	usageScaleFactor   = float64(cursorPerceivedMax) / float64(proxyMaxContext) // 5.0
+)
+
+// scaleUsageForContextLimit scale usage x5 để Cursor thấy đúng tỷ lệ context đã dùng.
+// Proxy limit 200K, Cursor hiểu 1M → mỗi token thực tế = 5 token perceived.
+func scaleUsageForContextLimit(data []byte) []byte {
+	if !bytes.Contains(data, []byte(`"usage"`)) {
+		return data
+	}
+
+	trimmed := bytes.TrimSpace(data)
+
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		payload := bytes.TrimSpace(trimmed[5:])
+		if len(payload) == 0 || !gjson.ValidBytes(payload) {
+			return data
+		}
+		updated := scaleUsageTokens(payload)
+		if bytes.Equal(payload, updated) {
+			return data
+		}
+		return append([]byte("data: "), updated...)
+	}
+
+	if gjson.ValidBytes(trimmed) {
+		return scaleUsageTokens(trimmed)
+	}
+
+	return data
+}
+
+// scaleUsageTokens scale MỌI token field x5 proportionally.
+// Giữ nguyên cấu trúc cache fields để Cursor tiếp tục track usage qua cache_read/cache_create.
+func scaleUsageTokens(data []byte) []byte {
+	paths := []string{"usage", "message.usage"}
+	fields := []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"}
+	for _, p := range paths {
+		if !gjson.GetBytes(data, p).Exists() {
+			continue
+		}
+		for _, f := range fields {
+			v := gjson.GetBytes(data, p+"."+f).Int()
+			if v > 0 {
+				data, _ = sjson.SetBytes(data, p+"."+f, int64(float64(v)*usageScaleFactor))
+			}
+		}
+	}
+	return data
 }
