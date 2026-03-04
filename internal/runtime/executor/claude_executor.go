@@ -261,7 +261,11 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		data,
 		&param,
 	)
-	resp = cliproxyexecutor.Response{Payload: scaleUsageForContextLimit([]byte(out)), Headers: httpResp.Header.Clone()}
+	outBytes := []byte(out)
+	if hasContext1MBeta(ctx) {
+		outBytes = scaleUsageForContextLimit(outBytes)
+	}
+	resp = cliproxyexecutor.Response{Payload: outBytes, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
 
@@ -422,6 +426,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		return nil, err
 	}
+	scaleUsage := hasContext1MBeta(ctx)
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
@@ -444,7 +449,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
 					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
 				}
-				line = scaleUsageForContextLimit(line)
+				if scaleUsage {
+					line = scaleUsageForContextLimit(line)
+				}
 				cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
 				cloned[len(line)] = '\n'
@@ -482,7 +489,11 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				&param,
 			)
 			for i := range chunks {
-				out <- cliproxyexecutor.StreamChunk{Payload: scaleUsageForContextLimit([]byte(chunks[i]))}
+				chunkBytes := []byte(chunks[i])
+				if scaleUsage {
+					chunkBytes = scaleUsageForContextLimit(chunkBytes)
+				}
+				out <- cliproxyexecutor.StreamChunk{Payload: chunkBytes}
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
@@ -1735,6 +1746,16 @@ const (
 	cursorPerceivedMax = 1000000
 	usageScaleFactor   = float64(cursorPerceivedMax) / float64(proxyMaxContext) // 5.0
 )
+
+// hasContext1MBeta kiểm tra request gốc (gin context) có chứa beta header context-1m không.
+// Chỉ khi client gửi context-1m beta (Cursor perceive 1M) thì mới cần scale usage x5.
+func hasContext1MBeta(ctx context.Context) bool {
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil || ginCtx.Request == nil {
+		return false
+	}
+	return strings.Contains(ginCtx.GetHeader("Anthropic-Beta"), "context-1m")
+}
 
 // scaleUsageForContextLimit scale usage x5 để Cursor thấy đúng tỷ lệ context đã dùng.
 // Proxy limit 200K, Cursor hiểu 1M → mỗi token thực tế = 5 token perceived.

@@ -7,11 +7,15 @@
  * thiếu apiKey/openaiApiBaseUrl → request đi qua Cursor server thay vì custom proxy
  * → "Slow Pool Error: Claude 4.6 Opus is not currently enabled in the slow pool"
  *
- * Fix: Inject credentials từ aiService.getModelDetails vào constructor.
- * Dùng regex để handle minified class/variable names (thay đổi mỗi version).
+ * Fix: Inject credentials từ cursorAuthenticationService và reactiveStorageService
+ * vào Zf constructor.
+ *
+ * NOTE: Từ Cursor 2.6.11, class chứa summarize không còn có aiService.
+ * Dùng cursorAuthenticationService.getApiKeyForModel + reactiveStorageService thay thế.
  *
  * Usage: node patch-cursor-summarize-credentials.js [--restore]
  *
+ * Tested on: Cursor 2.6.11
  * Xem CURSOR-ARCHITECTURE.md để hiểu chi tiết kiến trúc.
  */
 
@@ -26,7 +30,7 @@ const WORKBENCH_BACKUP = WORKBENCH_PATH + ".backup";
 const PRODUCT_BACKUP = PRODUCT_PATH + ".backup";
 const CHECKSUM_KEY = "vs/workbench/workbench.desktop.main.js";
 
-const PATCH_MARKER = '_d=this.aiService.getModelDetails({specificModelField:"composer"})';
+const PATCH_MARKER = "_creds_s=this.reactiveStorageService.applicationUserPersistentStorage";
 
 function updateProductChecksum() {
   const fileData = fs.readFileSync(WORKBENCH_PATH);
@@ -86,11 +90,12 @@ if (!data.includes('"summarizeAction"')) {
 }
 
 /**
- * Search pattern (regex):
- *   credentials:this.convertModelDetailsToCredentials(new <ClassName>({modelName:<varName>.modelConfig?.modelName}))
+ * Search pattern (v2 - Cursor 2.6.11+):
  *
- * - <ClassName> và <varName> là minified names, thay đổi mỗi version → dùng regex capture
- * - "credentials:", "convertModelDetailsToCredentials", "modelName:", "modelConfig" là stable identifiers
+ *   f=new Zf({modelName:u.modelConfig?.modelName})
+ *
+ * Khác với v1 (Cursor 2.5.x) đặt Zf trong convertModelDetailsToCredentials(),
+ * v2 tách riêng: tạo Zf trước, sau đó truyền vào convertModelDetailsToCredentials(f).
  *
  * Chỉ match pattern gần "summarizeAction" để tránh false positives.
  */
@@ -101,17 +106,15 @@ if (regionStart === -1) {
   process.exit(1);
 }
 
-const SEARCH_REGEX =
-  /credentials:this\.convertModelDetailsToCredentials\(new (\w+)\(\{modelName:(\w+)\.modelConfig\?\.modelName\}\)\)/;
+const ORIGINAL = "f=new Zf({modelName:u.modelConfig?.modelName})";
 
 // Tìm trong region 1000 chars sau summarizeAction
 const regionEnd = Math.min(data.length, regionStart + 1000);
 const region = data.substring(regionStart, regionEnd);
-const match = SEARCH_REGEX.exec(region);
 
-if (!match) {
+if (!region.includes(ORIGINAL)) {
   console.error("❌ Target pattern not found near summarizeAction.");
-  console.error("   Expected: credentials:this.convertModelDetailsToCredentials(new <Class>({modelName:<var>.modelConfig?.modelName}))");
+  console.error('   Expected: f=new Zf({modelName:u.modelConfig?.modelName})');
   console.error("");
   console.error("   Debug: check summarize method:");
   console.error(
@@ -122,12 +125,7 @@ if (!match) {
   process.exit(1);
 }
 
-const className = match[1];
-const varName = match[2];
-console.log(`   Detected: class=${className}, var=${varName}`);
-
 // Verify uniqueness: pattern phải xuất hiện đúng 1 lần trong TOÀN BỘ file
-const ORIGINAL = match[0];
 let count = 0;
 let pos = 0;
 while ((pos = data.indexOf(ORIGINAL, pos)) !== -1) {
@@ -153,22 +151,31 @@ if (!fs.existsSync(PRODUCT_BACKUP)) {
 }
 
 /**
- * Patch strategy:
+ * Patch strategy (v2 - Cursor 2.6.11+):
  *
  * ORIGINAL (trong summarize method):
- *   new Zf({modelName:u.modelConfig?.modelName})
+ *   f=new Zf({modelName:u.modelConfig?.modelName})
  *
  * PATCHED:
- *   new Zf({modelName:u.modelConfig?.modelName,...(()=>{try{const _d=this.aiService.getModelDetails(...)
- *     return{apiKey:_d?.apiKey,openaiApiBaseUrl:_d?.openaiApiBaseUrl,
- *            azureState:_d?.azureState,bedrockState:_d?.bedrockState}}catch(_e){return{}}})()})
+ *   f=new Zf({modelName:u.modelConfig?.modelName,...(()=>{try{
+ *     const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;
+ *     return{
+ *       apiKey:this.cursorAuthenticationService.getApiKeyForModel(u.modelConfig?.modelName),
+ *       openaiApiBaseUrl:_creds_s.openAIBaseUrl??void 0,
+ *       azureState:_creds_s.azureState,
+ *       bedrockState:_creds_s.bedrockState
+ *     }}catch(_e){return{}}})()})
  *
- * - this.aiService.getModelDetails({specificModelField:"composer"}) → full model details với credentials
+ * Services dùng (available trong class):
+ * - this.cursorAuthenticationService.getApiKeyForModel(modelName) → API key
+ * - this.reactiveStorageService.applicationUserPersistentStorage → storage chứa settings
+ *
+ * NOTE: Không cần aiService hay aiSettingsService (không còn trong class từ 2.6.11)
  * - Nếu không có custom API key → apiKey = undefined → không thay đổi behavior
- * - try/catch → graceful fallback nếu getModelDetails fail
+ * - try/catch → graceful fallback nếu services fail
  */
 const PATCHED =
-  `credentials:this.convertModelDetailsToCredentials(new ${className}({modelName:${varName}.modelConfig?.modelName,...(()=>{try{const _d=this.aiService.getModelDetails({specificModelField:"composer"});return{apiKey:_d?.apiKey,openaiApiBaseUrl:_d?.openaiApiBaseUrl,azureState:_d?.azureState,bedrockState:_d?.bedrockState}}catch(_e){return{}}})()}))`;
+  `f=new Zf({modelName:u.modelConfig?.modelName,...(()=>{try{const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;return{apiKey:this.cursorAuthenticationService.getApiKeyForModel(u.modelConfig?.modelName),openaiApiBaseUrl:_creds_s.openAIBaseUrl??void 0,azureState:_creds_s.azureState,bedrockState:_creds_s.bedrockState}}catch(_e){return{}}})()})`;
 
 console.log("🔧 Patching summarize credentials...");
 const patched = data.replace(ORIGINAL, PATCHED);
@@ -193,6 +200,5 @@ console.log("");
 console.log("🔄 To restore:");
 console.log("   node patch-cursor-summarize-credentials.js --restore");
 console.log("");
-console.log("⚠️  Nếu đã apply thinking patch hoặc subagent patch, cần re-apply sau restore:");
+console.log("⚠️  Nếu đã apply thinking patch, cần re-apply sau restore:");
 console.log("   node patch-cursor-thinking.js");
-console.log("   node patch-cursor-subagent-credentials.js");

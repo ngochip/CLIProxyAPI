@@ -5,6 +5,8 @@
 #   ./apply-all-patches.sh            # Apply all
 #   ./apply-all-patches.sh --restore  # Restore từ backup
 #   ./apply-all-patches.sh --status   # Chỉ check status
+#
+# Tested on: Cursor 2.6.11
 
 set -e
 
@@ -12,7 +14,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 PATCHES=(
   "patch-cursor-thinking.js"
-  "patch-cursor-subagent-credentials.js"
   "patch-cursor-summarize-credentials.js"
 )
 
@@ -28,18 +29,31 @@ if [[ "$1" == "--status" ]]; then
     exit 1
   fi
 
+  # Get Cursor version
+  PRODUCT="/Applications/Cursor.app/Contents/Resources/app/product.json"
+  if [[ -f "$PRODUCT" ]]; then
+    VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$PRODUCT','utf8')).version||'unknown')")
+    echo "Cursor version: $VERSION"
+    echo ""
+  fi
+
   node -e "
     const fs = require('fs');
     const data = fs.readFileSync('$WORKBENCH', 'utf8');
     const patches = [
       { name: 'Thinking (handleTextDelta)',    marker: '__thinkTagState' },
-      { name: 'Thinking render (loading fix)', marker: '!m&&!t&&(e===void 0' },
-      { name: 'Subagent credentials',          marker: 'this._aiService.getModelDetails({specificModelField:\"composer\"})' },
-      { name: 'Summarize credentials',          marker: 'this.aiService.getModelDetails({specificModelField:\"composer\"})' },
+      { name: 'Thinking render (loading fix)', marker: 'if(t){const N=l,M=N&&!B', note: 'native fix' },
+      { name: 'Summarize credentials',         marker: '_creds_s=this.reactiveStorageService.applicationUserPersistentStorage' },
+      { name: 'Subagent credentials',          marker: null, note: 'Cursor fixed natively' },
     ];
     patches.forEach(p => {
+      if (p.marker === null) {
+        console.log('✅ ' + p.name + ' (' + p.note + ')');
+        return;
+      }
       const found = data.includes(p.marker);
-      console.log((found ? '✅' : '❌') + ' ' + p.name);
+      const suffix = p.note ? ' (' + p.note + ')' : '';
+      console.log((found ? '✅' : '❌') + ' ' + p.name + suffix);
     });
   "
   exit 0
