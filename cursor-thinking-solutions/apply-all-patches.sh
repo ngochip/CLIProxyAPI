@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATCHES=(
   "patch-cursor-thinking.js"
   "patch-cursor-summarize-credentials.js"
+  "patch-cursor-subagent-maxmode.js"
 )
 
 WORKBENCH="/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"
@@ -45,6 +46,7 @@ if [[ "$1" == "--status" ]]; then
       { name: 'Thinking render (loading fix)', marker: 'if(t){const N=l,M=N&&!B', note: 'native fix' },
       { name: 'Summarize credentials',         marker: '_creds_s=this.reactiveStorageService.applicationUserPersistentStorage' },
       { name: 'Subagent credentials',          marker: null, note: 'Cursor fixed natively' },
+      { name: 'Subagent maxMode (thinking)',   marker: 'maxMode:this._modelConfigService.getModelConfig(\"composer\").maxMode' },
     ];
     patches.forEach(p => {
       if (p.marker === null) {
