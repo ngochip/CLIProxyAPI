@@ -89,7 +89,7 @@ Provider lookup: "claude-opus-4-5-20251101" + thinking level "high"
 │  │ <think>                                                   │           │
 │  │ Let me analyze this...                                    │           │
 │  │ </think>                                                  │           │
-│  │ ```plaintext:thinkId:a1b2c3d4e5f6...```                  │           │
+│  │ <!--thinkId:a1b2c3d4e5f6...-->                            │           │
 │  │                                                           │           │
 │  │ Here is my response...                                    │           │
 │  └──────────────────────────────────────────────────────────┘           │
@@ -106,7 +106,7 @@ Provider lookup: "claude-opus-4-5-20251101" + thinking level "high"
 │  │ <think>                                                   │           │
 │  │ Let me analyze this...                                    │           │
 │  │ </think>                                                  │           │
-│  │ ```plaintext:thinkId:a1b2c3d4e5f6...```                  │           │
+│  │ <!--thinkId:a1b2c3d4e5f6...-->                            │           │
 │  │                                                           │           │
 │  │ Here is my response...                                    │           │
 │  └──────────────────────────────────────────────────────────┘           │
@@ -136,8 +136,8 @@ Provider lookup: "claude-opus-4-5-20251101" + thinking level "high"
 | File | Purpose |
 |------|---------|
 | `internal/cache/signature_cache.go` | Cache storage for thinking + signature |
-| `internal/translator/claude/openai/chat-completions/claude_openai_response.go` | Wrap thinking in `<think>` tags, append thinkId |
-| `internal/translator/claude/openai/chat-completions/claude_openai_request.go` | Extract thinkId, lookup cache, restore signature |
+| `internal/translator/claude/openai/chat-completions/claude_openai_response.go` | Wrap thinking in `<think>` tags, append thinkId as HTML comment `<!--thinkId:xxx-->` |
+| `internal/translator/claude/openai/chat-completions/claude_openai_request.go` | Extract thinkId from HTML comment, lookup cache, restore signature |
 
 #### Cache Functions
 
@@ -207,9 +207,9 @@ go test ./test/... -v
 
 ### Thinking not preserved in multi-turn
 - Check cache TTL (default 2 hours)
-- Verify thinkId marker format: `` ```plaintext:thinkId:xxx``` ``
+- Verify thinkId marker format: `<!--thinkId:xxx-->`
 - Check `GetCachedThinking()` returns valid entry
 
 ---
 
-*Last updated: 2026-01-18*
+*Last updated: 2026-03-05*

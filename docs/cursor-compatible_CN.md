@@ -89,7 +89,7 @@ Cursor 请求: "claude-4.5-opus-high-thinking"
 │  │ <think>                                                   │           │
 │  │ 让我分析一下...                                           │           │
 │  │ </think>                                                  │           │
-│  │ ```plaintext:thinkId:a1b2c3d4e5f6...```                  │           │
+│  │ <!--thinkId:a1b2c3d4e5f6...-->                            │           │
 │  │                                                           │           │
 │  │ 这是我的回复...                                           │           │
 │  └──────────────────────────────────────────────────────────┘           │
@@ -106,7 +106,7 @@ Cursor 请求: "claude-4.5-opus-high-thinking"
 │  │ <think>                                                   │           │
 │  │ 让我分析一下...                                           │           │
 │  │ </think>                                                  │           │
-│  │ ```plaintext:thinkId:a1b2c3d4e5f6...```                  │           │
+│  │ <!--thinkId:a1b2c3d4e5f6...-->                            │           │
 │  │                                                           │           │
 │  │ 这是我的回复...                                           │           │
 │  └──────────────────────────────────────────────────────────┘           │
@@ -136,8 +136,8 @@ Cursor 请求: "claude-4.5-opus-high-thinking"
 | 文件 | 用途 |
 |------|------|
 | `internal/cache/signature_cache.go` | 思考 + 签名的缓存存储 |
-| `internal/translator/claude/openai/chat-completions/claude_openai_response.go` | 将思考包装在 `<think>` 标签中，附加 thinkId |
-| `internal/translator/claude/openai/chat-completions/claude_openai_request.go` | 提取 thinkId，查找缓存，恢复签名 |
+| `internal/translator/claude/openai/chat-completions/claude_openai_response.go` | 将思考包装在 `<think>` 标签中，附加 thinkId（HTML 注释 `<!--thinkId:xxx-->`） |
+| `internal/translator/claude/openai/chat-completions/claude_openai_request.go` | 从 HTML 注释中提取 thinkId，查找缓存，恢复签名 |
 
 #### 缓存函数
 
@@ -207,9 +207,9 @@ go test ./test/... -v
 
 ### 多轮对话中思考未保留
 - 检查缓存 TTL（默认 2 小时）
-- 验证 thinkId 标记格式: `` ```plaintext:thinkId:xxx``` ``
+- 验证 thinkId 标记格式: `<!--thinkId:xxx-->`
 - 检查 `GetCachedThinking()` 是否返回有效条目
 
 ---
 
-*最后更新: 2026-01-18*
+*最后更新: 2026-03-05*
