@@ -1,8 +1,10 @@
 // Package claude implements thinking configuration scaffolding for Claude models.
 //
-// Claude models use the thinking.budget_tokens format with values in the range
-// 1024-128000. Some Claude models support ZeroAllowed (sonnet-4-5, opus-4-5),
-// while older models do not.
+// Claude models support two thinking control styles:
+//   - Manual thinking: thinking.type="enabled" with thinking.budget_tokens (token budget)
+//   - Adaptive thinking (Claude 4.6): thinking.type="adaptive" with output_config.effort (low/medium/high/max)
+//
+// Some Claude models support ZeroAllowed (sonnet-4-5, opus-4-5), while older models do not.
 // See: _bmad-output/planning-artifacts/architecture.md#Epic-6
 package claude
 
@@ -34,10 +36,11 @@ func init() {
 //   - Budget clamping to model range
 //   - ZeroAllowed constraint enforcement
 //
-// Apply processes ModeBudget, ModeNone, and ModeAuto:
-//   - ModeAuto + DynamicAllowed → thinking.type="adaptive" (Opus 4.6+)
-//   - ModeBudget → thinking.type="enabled" + budget_tokens
-//   - ModeNone → thinking.type="disabled"
+// Apply processes:
+//   - ModeBudget: manual thinking budget_tokens
+//   - ModeLevel: adaptive thinking effort (Claude 4.6)
+//   - ModeAuto: provider default adaptive/manual behavior
+//   - ModeNone: disabled
 //
 // Expected output format when adaptive (Opus 4.6+):
 //
@@ -53,6 +56,17 @@ func init() {
 //	  "thinking": {
 //	    "type": "enabled",
 //	    "budget_tokens": 16384
+//	  }
+//	}
+//
+// Expected output format for adaptive:
+//
+//	{
+//	  "thinking": {
+//	    "type": "adaptive"
+//	  },
+//	  "output_config": {
+//	    "effort": "high"
 //	  }
 //	}
 //
@@ -72,7 +86,6 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	}
 
 	// Speed-only config: chỉ set speed, KHÔNG touch thinking
-	// Ví dụ: claude-opus-4-6(fast) → speed=fast, thinking giữ nguyên từ request
 	if isSpeedOnly(config) {
 		if len(body) == 0 || !gjson.ValidBytes(body) {
 			body = []byte(`{}`)
@@ -80,8 +93,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return applySpeed(body, config), nil
 	}
 
-	// Effort-only config: chỉ set output_config.effort, KHÔNG touch thinking
-	// Ví dụ: claude-opus-4-6(max) → effort=max, thinking giữ nguyên từ request
+	// Effort-only config: chỉ set effort + speed, không touch thinking
 	if isEffortOnly(config) {
 		if len(body) == 0 || !gjson.ValidBytes(body) {
 			body = []byte(`{}`)
@@ -89,46 +101,93 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return applySpeed(applyEffort(body, config), config), nil
 	}
 
-	// Xử lý ModeBudget, ModeNone, và ModeAuto (adaptive)
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
-		return body, nil
-	}
 
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
 
-	// ModeNone → disabled (nhưng vẫn có thể set effort và speed)
-	if config.Mode == thinking.ModeNone || config.Budget == 0 {
+	supportsAdaptive := modelInfo != nil && modelInfo.Thinking != nil && len(modelInfo.Thinking.Levels) > 0
+
+	switch config.Mode {
+	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result = applyEffort(result, config)
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
 		result = applySpeed(result, config)
 		return result, nil
-	}
 
-	// ModeAuto + DynamicAllowed → adaptive thinking (Opus 4.6+)
-	// Claude tự quyết định khi nào và bao nhiêu thinking, không cần budget_tokens
-	if config.Mode == thinking.ModeAuto && modelInfo.Thinking.DynamicAllowed {
-		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
-		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result = applyEffort(result, config)
-		result = applySpeed(result, config)
-		return result, nil
-	}
+	case thinking.ModeLevel:
+		// Adaptive thinking effort is only valid when the model advertises discrete levels.
+		// (Claude 4.6 uses output_config.effort.)
+		if supportsAdaptive && config.Level != "" {
+			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+			return result, nil
+		}
 
-	// ModeBudget hoặc ModeAuto fallback → enabled + budget_tokens
-	result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
-	if config.Budget > 0 {
+		// Fallback for non-adaptive Claude models: convert level to budget_tokens.
+		if budget, ok := thinking.ConvertLevelToBudget(string(config.Level)); ok {
+			config.Mode = thinking.ModeBudget
+			config.Budget = budget
+			config.Level = ""
+		} else {
+			return body, nil
+		}
+		fallthrough
+
+	case thinking.ModeBudget:
+		// Budget is expected to be pre-validated by ValidateConfig (clamped, ZeroAllowed enforced).
+		// Decide enabled/disabled based on budget value.
+		if config.Budget == 0 {
+			result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			result, _ = sjson.DeleteBytes(result, "output_config.effort")
+			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+				result, _ = sjson.DeleteBytes(result, "output_config")
+			}
+			return result, nil
+		}
+
+		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
-		// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint)
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
+
+		// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint).
 		result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
-	} else {
+		return result, nil
+
+	case thinking.ModeAuto:
+		// For Claude 4.6 models, auto maps to adaptive thinking with upstream defaults.
+		if supportsAdaptive {
+			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+			// Explicit effort is optional for adaptive thinking; omit it to allow upstream default.
+			result, _ = sjson.DeleteBytes(result, "output_config.effort")
+			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+				result, _ = sjson.DeleteBytes(result, "output_config")
+			}
+			return result, nil
+		}
+
+		// Legacy fallback: enable thinking without specifying budget_tokens.
+		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
+		return result, nil
+
+	default:
+		return body, nil
 	}
-	result = applyEffort(result, config)
-	result = applySpeed(result, config)
-	return result, nil
 }
 
 // isSpeedOnly returns true khi config CHỈ có Speed, không có thinking mode hay effort nào.
@@ -244,20 +303,38 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result = applyEffort(result, config)
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
 		result = applySpeed(result, config)
 		return result, nil
 	case thinking.ModeAuto:
 		// User-defined model: dùng adaptive (Opus 4.6+ recommended)
 		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result = applyEffort(result, config)
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
+		result = applySpeed(result, config)
+		return result, nil
+	case thinking.ModeLevel:
+		if config.Level == "" {
+			return body, nil
+		}
+		result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
+		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
+		result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
 		result = applySpeed(result, config)
 		return result, nil
 	default:
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
-		result = applyEffort(result, config)
+		result, _ = sjson.DeleteBytes(result, "output_config.effort")
+		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+			result, _ = sjson.DeleteBytes(result, "output_config")
+		}
 		result = applySpeed(result, config)
 		return result, nil
 	}
