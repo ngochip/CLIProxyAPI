@@ -222,8 +222,8 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 					// log.Debugf("Cached thinking block (thinkingID=%s, textLen=%d)", thinkingID, len(thinkingText))
 				}
 
-				// Stream closing </think> tag + hidden thinkId marker
-				closingContent := "\n</think>\n```plaintext:thinkId:" + thinkingID + "```\n"
+				// Stream closing </think> tag + hidden thinkId marker (HTML comment ẩn trên Cursor UI)
+				closingContent := "\n</think>\n<!--thinkId:" + thinkingID + "-->\n"
 				template, _ = sjson.Set(template, "choices.0.delta.content", closingContent)
 
 				// Clean up the accumulator for this index

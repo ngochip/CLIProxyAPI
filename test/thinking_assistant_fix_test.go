@@ -174,7 +174,7 @@ func TestAssistantWithCachedThinking(t *testing.T) {
 			},
 			{
 				"role": "assistant",
-				"content": "` + "```plaintext:thinkId:" + thinkingID + "```" + `\nI will help you."
+				"content": "` + "<!--thinkId:" + thinkingID + "-->" + `\nI will help you."
 			}
 		],
 		"reasoning_effort": "high"

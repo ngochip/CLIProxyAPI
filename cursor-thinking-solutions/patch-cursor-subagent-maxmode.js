@@ -82,13 +82,14 @@ if (data.includes(PATCH_MARKER)) {
 }
 
 /**
- * Search pattern:
- *   modelName:e.modelId,maxMode:!1,...hty(e.credentials)
+ * Search pattern (version-independent):
+ *   modelName:e.modelId,maxMode:!1
  *
- * - "modelName:", "modelId", "maxMode:", "hty", "credentials" là stable identifiers
- * - Pattern nằm trong _runSubagent method
+ * Không include tên hàm minified (hty/gty/...) vì thay đổi mỗi version.
+ * "modelName:", "modelId", "maxMode:" là stable identifiers.
+ * Pattern unique vì chỉ có 1 chỗ trong _runSubagent tạo Zf với e.modelId.
  */
-const ORIGINAL = "modelName:e.modelId,maxMode:!1,...hty(e.credentials)";
+const ORIGINAL = "modelName:e.modelId,maxMode:!1";
 
 let count = 0;
 let pos = 0;
@@ -132,17 +133,18 @@ if (!fs.existsSync(PRODUCT_BACKUP)) {
  * Patch strategy:
  *
  * ORIGINAL (trong _runSubagent):
- *   new Zf({modelName:e.modelId, maxMode:!1, ...hty(e.credentials)})
+ *   new Zf({modelName:e.modelId, maxMode:!1, ...})
  *
  * PATCHED:
- *   new Zf({modelName:e.modelId, maxMode:this._modelConfigService.getModelConfig("composer").maxMode??!1, ...hty(e.credentials)})
+ *   new Zf({modelName:e.modelId, maxMode:this._modelConfigService.getModelConfig("composer").maxMode??!1, ...})
  *
  * - this._modelConfigService.getModelConfig("composer") → parent's composer config
  * - .maxMode → true nếu user bật thinking mode, false/undefined nếu không
  * - ?? !1 → fallback false nếu maxMode undefined
+ * - Chỉ replace "modelName:e.modelId,maxMode:!1" → phần sau (...spread) giữ nguyên
  */
 const PATCHED =
-  'modelName:e.modelId,maxMode:this._modelConfigService.getModelConfig("composer").maxMode??!1,...hty(e.credentials)';
+  'modelName:e.modelId,maxMode:this._modelConfigService.getModelConfig("composer").maxMode??!1';
 
 console.log("🔧 Patching subagent maxMode...");
 const patched = data.replace(ORIGINAL, PATCHED);

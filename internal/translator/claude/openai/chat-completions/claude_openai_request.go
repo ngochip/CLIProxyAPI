@@ -32,11 +32,8 @@ var (
 	// Regex patterns cho việc parse thinking content
 	// Pattern cho <think> tag
 	thinkTagRegex = regexp.MustCompile(`<think>([\s\S]*?)</think>`)
-	// Pattern cho thinkId marker: ```plaintext:thinkId:xxx```
-	thinkIdRegex = regexp.MustCompile("```plaintext:thinkId:([a-f0-9]+)```")
-	// Legacy patterns cho backward compatibility
-	legacyThinkingRegex  = regexp.MustCompile("```plaintext:Thinking\\n([\\s\\S]*?)```")
-	legacySignatureRegex = regexp.MustCompile("```plaintext:Signature:([\\s\\S]*?)```")
+	// Pattern cho thinkId marker: <!--thinkId:xxx--> (HTML comment, ẩn trên Cursor UI)
+	thinkIdRegex = regexp.MustCompile(`<!--thinkId:([a-f0-9]+)-->`)
 )
 
 // Note: deriveSessionID đã bị loại bỏ vì không cần thiết.
@@ -105,9 +102,7 @@ func ensureAssistantThinkingBlock(requestJSON string) string {
 }
 
 // extractThinkingFromContent trích xuất thinking từ text content
-// Hỗ trợ 2 formats:
-// 1. New format: thinkId marker ```plaintext:thinkId:xxx``` -> lookup cache
-// 2. Legacy format: ```plaintext:Thinking\n...\n``` + ```plaintext:Signature:...```
+// Format: thinkId marker <!--thinkId:xxx--> -> lookup cache
 func extractThinkingFromContent(text string) []interface{} {
 	// Thử tìm thinkId marker trước (new format)
 	idMatch := thinkIdRegex.FindStringSubmatch(text)
@@ -196,48 +191,9 @@ func extractThinkingFromContent(text string) []interface{} {
 		}
 	}
 
-	// Thử legacy format (backward compatibility)
-	thinkingMatch := legacyThinkingRegex.FindStringSubmatch(text)
-	signatureMatch := legacySignatureRegex.FindStringSubmatch(text)
-	if len(thinkingMatch) > 0 && len(signatureMatch) > 0 {
-		thinkingText := thinkingMatch[1]
-		signatureText := signatureMatch[1]
-
-		// Unescape ``` trong thinking text
-
-		// Xóa các blocks khỏi text gốc
-		remainingText := legacyThinkingRegex.ReplaceAllString(text, "")
-		remainingText = legacySignatureRegex.ReplaceAllString(remainingText, "")
-		remainingText = strings.TrimSpace(remainingText)
-
-		var parts []interface{}
-
-		// Part 1: thinking block với thinking và signature
-		thinkingPart := map[string]interface{}{
-			"type":      "thinking",
-			"thinking":  thinkingText,
-			"signature": signatureText,
-		}
-		parts = append(parts, thinkingPart)
-
-		// Part 2: phần text còn lại (nếu có)
-		if remainingText != "" {
-			textPart := map[string]interface{}{
-				"type": "text",
-				"text": remainingText,
-			}
-			parts = append(parts, textPart)
-		}
-
-		return parts
-	}
-
 	// No valid thinking format found → clean up và return text only
-	// Remove any orphan markers
 	cleanText := thinkTagRegex.ReplaceAllString(text, "")
 	cleanText = thinkIdRegex.ReplaceAllString(cleanText, "")
-	cleanText = legacyThinkingRegex.ReplaceAllString(cleanText, "")
-	cleanText = legacySignatureRegex.ReplaceAllString(cleanText, "")
 	cleanText = strings.TrimSpace(cleanText)
 
 	if cleanText == "" {
