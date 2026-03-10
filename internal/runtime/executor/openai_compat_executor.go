@@ -257,7 +257,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return nil, err
 	}
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 32)
 	go func() {
 		defer close(out)
 		defer func() {

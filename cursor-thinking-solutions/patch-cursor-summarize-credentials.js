@@ -10,12 +10,13 @@
  * Fix: Inject credentials từ cursorAuthenticationService và reactiveStorageService
  * vào Zf constructor.
  *
- * NOTE: Từ Cursor 2.6.11, class chứa summarize không còn có aiService.
+ * NOTE: Từ Cursor 2.6.11+, class chứa summarize không còn có aiService.
  * Dùng cursorAuthenticationService.getApiKeyForModel + reactiveStorageService thay thế.
+ * Class name (Zf, Yf, ...) thay đổi theo bản Cursor → auto-detect bằng regex.
  *
  * Usage: node patch-cursor-summarize-credentials.js [--restore]
  *
- * Tested on: Cursor 2.6.11
+ * Tested on: Cursor 2.6.11, 2.6.14+
  * Xem CURSOR-ARCHITECTURE.md để hiểu chi tiết kiến trúc.
  */
 
@@ -92,12 +93,10 @@ if (!data.includes('"summarizeAction"')) {
 /**
  * Search pattern (v2 - Cursor 2.6.11+):
  *
- *   f=new Zf({modelName:u.modelConfig?.modelName})
+ *   f=new <ModelDetailsClass>({modelName:u.modelConfig?.modelName})
  *
- * Khác với v1 (Cursor 2.5.x) đặt Zf trong convertModelDetailsToCredentials(),
- * v2 tách riêng: tạo Zf trước, sau đó truyền vào convertModelDetailsToCredentials(f).
- *
- * Chỉ match pattern gần "summarizeAction" để tránh false positives.
+ * Class name (Zf, Yf, ...) thay đổi theo từng bản Cursor.
+ * Auto-detect bằng regex gần "summarizeAction" thay vì hardcode.
  */
 const REGION_ANCHOR = '"summarizeAction"';
 const regionStart = data.indexOf(REGION_ANCHOR);
@@ -106,24 +105,29 @@ if (regionStart === -1) {
   process.exit(1);
 }
 
-const ORIGINAL = "f=new Zf({modelName:u.modelConfig?.modelName})";
-
-// Tìm trong region 1000 chars sau summarizeAction
-const regionEnd = Math.min(data.length, regionStart + 1000);
+const regionEnd = Math.min(data.length, regionStart + 1500);
 const region = data.substring(regionStart, regionEnd);
 
-if (!region.includes(ORIGINAL)) {
+// Auto-detect class name: f=new <ClassName>({modelName:u.modelConfig?.modelName})
+const modelDetailsRegex = /f=new (\w+)\(\{modelName:u\.modelConfig\?\.modelName\}\)/;
+const regionMatch = region.match(modelDetailsRegex);
+
+if (!regionMatch) {
   console.error("❌ Target pattern not found near summarizeAction.");
-  console.error('   Expected: f=new Zf({modelName:u.modelConfig?.modelName})');
+  console.error("   Expected: f=new <ClassName>({modelName:u.modelConfig?.modelName})");
   console.error("");
   console.error("   Debug: check summarize method:");
   console.error(
     '   node -e "const d=require(\'fs\').readFileSync(\'' +
       WORKBENCH_PATH +
-      "','utf8');const i=d.indexOf('summarizeAction');console.log(d.substring(i,i+500))\""
+      "','utf8');const i=d.indexOf('summarizeAction');console.log(d.substring(i,i+1500))\""
   );
   process.exit(1);
 }
+
+const MODEL_DETAILS_CLASS = regionMatch[1];
+const ORIGINAL = `f=new ${MODEL_DETAILS_CLASS}({modelName:u.modelConfig?.modelName})`;
+console.log(`   ModelDetails class: ${MODEL_DETAILS_CLASS}`);
 
 // Verify uniqueness: pattern phải xuất hiện đúng 1 lần trong TOÀN BỘ file
 let count = 0;
@@ -154,10 +158,10 @@ if (!fs.existsSync(PRODUCT_BACKUP)) {
  * Patch strategy (v2 - Cursor 2.6.11+):
  *
  * ORIGINAL (trong summarize method):
- *   f=new Zf({modelName:u.modelConfig?.modelName})
+ *   f=new <ModelDetailsClass>({modelName:u.modelConfig?.modelName})
  *
  * PATCHED:
- *   f=new Zf({modelName:u.modelConfig?.modelName,...(()=>{try{
+ *   f=new <ModelDetailsClass>({modelName:u.modelConfig?.modelName,...(()=>{try{
  *     const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;
  *     return{
  *       apiKey:this.cursorAuthenticationService.getApiKeyForModel(u.modelConfig?.modelName),
@@ -170,12 +174,10 @@ if (!fs.existsSync(PRODUCT_BACKUP)) {
  * - this.cursorAuthenticationService.getApiKeyForModel(modelName) → API key
  * - this.reactiveStorageService.applicationUserPersistentStorage → storage chứa settings
  *
- * NOTE: Không cần aiService hay aiSettingsService (không còn trong class từ 2.6.11)
- * - Nếu không có custom API key → apiKey = undefined → không thay đổi behavior
- * - try/catch → graceful fallback nếu services fail
+ * NOTE: Class name (Zf, Yf, ...) auto-detected ở trên.
  */
 const PATCHED =
-  `f=new Zf({modelName:u.modelConfig?.modelName,...(()=>{try{const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;return{apiKey:this.cursorAuthenticationService.getApiKeyForModel(u.modelConfig?.modelName),openaiApiBaseUrl:_creds_s.openAIBaseUrl??void 0,azureState:_creds_s.azureState,bedrockState:_creds_s.bedrockState}}catch(_e){return{}}})()})`;
+  `f=new ${MODEL_DETAILS_CLASS}({modelName:u.modelConfig?.modelName,...(()=>{try{const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;return{apiKey:this.cursorAuthenticationService.getApiKeyForModel(u.modelConfig?.modelName),openaiApiBaseUrl:_creds_s.openAIBaseUrl??void 0,azureState:_creds_s.azureState,bedrockState:_creds_s.bedrockState}}catch(_e){return{}}})()})`;
 
 console.log("🔧 Patching summarize credentials...");
 const patched = data.replace(ORIGINAL, PATCHED);

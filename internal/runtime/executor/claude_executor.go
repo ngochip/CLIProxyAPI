@@ -447,7 +447,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				errText = "prompt is too long"
 			}
 			errText += "\n<summarize></summarize>"
-			out := make(chan cliproxyexecutor.StreamChunk)
+			out := make(chan cliproxyexecutor.StreamChunk, 32)
 			go func() {
 				defer close(out)
 				sseLines := buildSyntheticClaudeStreamLines(baseModel, errText)
@@ -482,7 +482,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, err
 	}
 	scaleUsage := hasContext1MBeta(ctx)
-	out := make(chan cliproxyexecutor.StreamChunk)
+	out := make(chan cliproxyexecutor.StreamChunk, 32)
 	go func() {
 		defer close(out)
 		defer func() {
