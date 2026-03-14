@@ -2,7 +2,7 @@
 
 Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 
-**Cursor version tested:** 2.5.17 (2026-02-22)
+**Cursor version tested:** 2.6.19 (2026-03-14)
 **OS:** macOS (darwin)
 
 ---
@@ -10,16 +10,28 @@ Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 ## Quick Start
 
 ```bash
-# Apply tất cả patches
-node cursor-thinking-solutions/patch-cursor-thinking.js
-node cursor-thinking-solutions/patch-cursor-subagent-credentials.js
+# Apply tất cả patches (tự detect version, skip nếu đã fix natively)
+./cursor-thinking-solutions/apply-all-patches.sh
 
-# Restart Cursor (Cmd+Q → reopen)
+# Check trạng thái
+./cursor-thinking-solutions/apply-all-patches.sh --status
 
 # Restore tất cả patches
-node cursor-thinking-solutions/patch-cursor-thinking.js --restore
-node cursor-thinking-solutions/patch-cursor-subagent-credentials.js --restore
+./cursor-thinking-solutions/apply-all-patches.sh --restore
+
+# Restart Cursor (Cmd+Q → reopen)
 ```
+
+---
+
+## Patch Status (Cursor 2.6.19)
+
+| Patch | Trạng thái | Ghi chú |
+|-------|-----------|---------|
+| Thinking blocks (`<think>` tags) | **Active** — cần patch | Cursor chưa support natively |
+| Summarize credentials | **Active** — cần patch | Custom OpenAI creds cho summarization |
+| Subagent credentials | **Không cần** | Cursor ≥ 2.6.11 đã fix natively |
+| Subagent maxMode (thinking) | **Không cần** | Cursor ≥ 2.6.19 đã fix natively |
 
 ---
 
@@ -53,42 +65,31 @@ handleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolCalls()
 
 **Chi tiết kỹ thuật:** xem [CURSOR-ARCHITECTURE.md](CURSOR-ARCHITECTURE.md) mục 3 (Internal Event Pipeline).
 
-### 2. Sub-agent Credentials Patch (`patch-cursor-subagent-credentials.js`)
+### 2. Summarize Credentials Patch (`patch-cursor-summarize-credentials.js`)
 
-**Vấn đề:** Khi sub-agents (Task tool) được spawn, chúng KHÔNG kế thừa custom OpenAI base URL và API key từ parent conversation. Sub-agents luôn dùng Cursor default API.
+**Vấn đề:** Cursor summarize conversation dùng hardcoded credentials (Cursor API), không dùng user's custom OpenAI credentials. Kết quả: summarization fails khi dùng custom proxy.
 
-**Root cause:** `_runSubagent` tạo model details object thiếu `apiKey` và `openaiApiBaseUrl`:
+**Giải pháp:** Patch `ModelDetails` class để đọc custom OpenAI credentials từ `reactiveStorageService` và dùng cho summarize requests.
+
+### 3. Sub-agent maxMode Patch (`patch-cursor-subagent-maxmode.js`) — DEPRECATED
+
+**Trạng thái:** Không cần từ Cursor ≥ 2.6.19. Script tự detect và skip.
+
+**Vấn đề gốc:** `_runSubagent` hardcode `maxMode:!1` → sub-agents LUÔN chạy không có thinking, dù parent conversation bật thinking mode.
+
+**Cursor 2.6.19 đã fix:** Code mới đọc `modelConfig?.maxMode` từ parent composer:
 ```javascript
-// BUG: thiếu credentials
-const u = new Xf({modelName: e.modelId, maxMode: !1});
+const m = d ? this._composerDataService.getComposerData(d)?.modelConfig?.maxMode ?? !1 : !1;
+new Yf({modelName:e.modelId, maxMode:m, ...Qty(e.credentials)});
 ```
 
-Trong khi parent conversation dùng `getModelDetailsFromName()` trả về đầy đủ credentials.
+### 4. Sub-agent Credentials Patch (`patch-cursor-subagent-credentials.js`) — DEPRECATED
 
-**Giải pháp:** Inject credentials từ parent model vào Xf constructor bằng spread operator:
-```javascript
-new Xf({
-  modelName: e.modelId, maxMode: !1,
-  ...(()=>{
-    try {
-      const _d = this._aiService.getModelDetails({specificModelField:"composer"});
-      return {
-        apiKey: _d?.apiKey,
-        openaiApiBaseUrl: _d?.openaiApiBaseUrl,
-        azureState: _d?.azureState,
-        bedrockState: _d?.bedrockState
-      };
-    } catch(_e) { return {}; }
-  })()
-})
-```
+**Trạng thái:** Không cần từ Cursor ≥ 2.6.11. Giữ lại để reference.
 
-**Search pattern (unique):**
-```
-modelName:e.modelId,maxMode:!1}
-```
+**Vấn đề gốc:** Sub-agents không kế thừa custom OpenAI base URL và API key từ parent conversation.
 
-**Chi tiết kỹ thuật:** xem [CURSOR-ARCHITECTURE.md](CURSOR-ARCHITECTURE.md) mục 5 (Subagent Architecture).
+**Cursor 2.6.11 đã fix:** Credentials giờ được truyền qua `e.credentials` + helper function.
 
 ---
 
@@ -103,25 +104,13 @@ Khi Cursor auto-update, workbench file bị thay thế → tất cả patches m�
 rm -f "/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js.backup"
 rm -f "/Applications/Cursor.app/Contents/Resources/app/product.json.backup"
 
-# 2. Verify patterns vẫn tồn tại
-node -e "
-const data = require('fs').readFileSync('/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js', 'utf8');
-const patterns = [
-  ['thinking', 'handleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolCalls()'],
-  ['subagent-creds', 'modelName:e.modelId,maxMode:!1}']
-];
-patterns.forEach(([name, p]) => {
-  let c = 0, i = 0;
-  while ((i = data.indexOf(p, i)) !== -1) { c++; i++; }
-  console.log(name + ': ' + c + ' hit(s) ' + (c === 1 ? '✅' : '❌ CHANGED'));
-});
-"
+# 2. Apply patches (tự detect version, skip deprecated patches)
+./cursor-thinking-solutions/apply-all-patches.sh
 
-# 3. Re-apply patches
-node cursor-thinking-solutions/patch-cursor-thinking.js
-node cursor-thinking-solutions/patch-cursor-subagent-credentials.js
+# 3. Check status
+./cursor-thinking-solutions/apply-all-patches.sh --status
 
-# 4. Restart Cursor
+# 4. Restart Cursor (Cmd+Q → reopen)
 ```
 
 ### Nếu pattern thay đổi
@@ -129,19 +118,19 @@ node cursor-thinking-solutions/patch-cursor-subagent-credentials.js
 Xem [CURSOR-ARCHITECTURE.md](CURSOR-ARCHITECTURE.md) mục 9 (Checklist khi Cursor Update) để debug:
 
 ```bash
+# Tìm handleTextDelta signature mới
+node -e "
+const d=require('fs').readFileSync('/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js','utf8');
+let p=0;
+while(true){p=d.indexOf('handleTextDelta',p);if(p===-1)break;console.log(d.substring(p,p+200));p+=10;}
+"
+
 # Tìm _runSubagent signature mới
 node -e "
 const d=require('fs').readFileSync('/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js','utf8');
 const i=d.indexOf('_runSubagent');
 if(i===-1) console.log('_runSubagent NOT FOUND - method may be renamed');
 else console.log(d.substring(i, i+800));
-"
-
-# Tìm handleTextDelta signature mới
-node -e "
-const d=require('fs').readFileSync('/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js','utf8');
-let p=0;
-while(true){p=d.indexOf('handleTextDelta',p);if(p===-1)break;console.log(d.substring(p,p+200));p+=10;}
 "
 ```
 
@@ -168,6 +157,11 @@ Xem [CURSOR-ARCHITECTURE.md](CURSOR-ARCHITECTURE.md) cho tài liệu chi tiết 
 |------|--------|
 | `README.md` | Index doc (file này) |
 | `CURSOR-ARCHITECTURE.md` | Cursor internals reference cho future agents |
+| `apply-all-patches.sh` | Script apply/restore/status tất cả patches |
+| `check-patch-status.js` | Status checker (dùng bởi apply-all-patches.sh) |
 | `patch-cursor-thinking.js` | Patch thinking block display |
-| `patch-cursor-subagent-credentials.js` | Patch sub-agent custom API credentials |
+| `patch-cursor-summarize-credentials.js` | Patch summarize dùng custom OpenAI creds |
+| `patch-cursor-subagent-maxmode.js` | ~~Patch sub-agent maxMode~~ (deprecated, Cursor fixed natively) |
+| `patch-cursor-subagent-credentials.js` | ~~Patch sub-agent credentials~~ (deprecated, Cursor fixed natively) |
 | `cursor_thinking-solutions.md` | Transcript of original debugging session |
+| `cursor_think_tag_loading_issue.md` | Transcript debugging loading issue |

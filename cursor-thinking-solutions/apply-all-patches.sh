@@ -5,8 +5,6 @@
 #   ./apply-all-patches.sh            # Apply all
 #   ./apply-all-patches.sh --restore  # Restore từ backup
 #   ./apply-all-patches.sh --status   # Chỉ check status
-#
-# Tested on: Cursor 2.6.11
 
 set -e
 
@@ -38,26 +36,7 @@ if [[ "$1" == "--status" ]]; then
     echo ""
   fi
 
-  node -e "
-    const fs = require('fs');
-    const data = fs.readFileSync('$WORKBENCH', 'utf8');
-    const patches = [
-      { name: 'Thinking (handleTextDelta)',    marker: '__thinkTagState' },
-      { name: 'Thinking render (loading fix)', marker: 'if(t){const N=l,M=N&&!B', note: 'native fix' },
-      { name: 'Summarize credentials',         marker: '_creds_s=this.reactiveStorageService.applicationUserPersistentStorage' },
-      { name: 'Subagent credentials',          marker: null, note: 'Cursor fixed natively' },
-      { name: 'Subagent maxMode (thinking)',   marker: 'maxMode:this._modelConfigService.getModelConfig(\"composer\").maxMode' },
-    ];
-    patches.forEach(p => {
-      if (p.marker === null) {
-        console.log('✅ ' + p.name + ' (' + p.note + ')');
-        return;
-      }
-      const found = data.includes(p.marker);
-      const suffix = p.note ? ' (' + p.note + ')' : '';
-      console.log((found ? '✅' : '❌') + ' ' + p.name + suffix);
-    });
-  "
+  node "$SCRIPT_DIR/check-patch-status.js"
   exit 0
 fi
 

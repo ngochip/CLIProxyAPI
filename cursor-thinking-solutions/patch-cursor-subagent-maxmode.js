@@ -99,6 +99,14 @@ while ((pos = data.indexOf(ORIGINAL, pos)) !== -1) {
 }
 
 if (count === 0) {
+  // Cursor >= 2.7 đã fix maxMode inheritance natively
+  const nativeFixPattern = "modelConfig?.maxMode";
+  if (data.includes(nativeFixPattern)) {
+    console.log("ℹ️  Cursor đã tự fix maxMode inheritance. Patch này không cần nữa.");
+    console.log("   (Detected native fix: parentComposer → modelConfig?.maxMode)");
+    process.exit(0);
+  }
+
   console.error("❌ Target pattern not found. Cursor version may be incompatible.");
   console.error('   Pattern: "' + ORIGINAL + '"');
   console.error("");
