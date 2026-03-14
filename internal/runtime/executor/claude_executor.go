@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/textproto"
 	"runtime"
 	"strings"
 	"time"
@@ -291,9 +290,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		&param,
 	)
 	outBytes := []byte(out)
-	if hasContext1MBeta(ctx) {
-		outBytes = scaleUsageForContextLimit(outBytes)
-	}
 	resp = cliproxyexecutor.Response{Payload: outBytes, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -477,7 +473,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		}
 		return nil, err
 	}
-	scaleUsage := hasContext1MBeta(ctx)
 	out := make(chan cliproxyexecutor.StreamChunk, 32)
 	go func() {
 		defer close(out)
@@ -497,13 +492,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				if detail, ok := parseClaudeStreamUsage(line); ok {
 					reporter.publish(ctx, detail)
 				}
-				if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
-					line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
-				}
-				if scaleUsage {
-					line = scaleUsageForContextLimit(line)
-				}
-				cloned := make([]byte, len(line)+1)
+			if isClaudeOAuthToken(apiKey) && !auth.ToolPrefixDisabled() {
+				line = stripClaudeToolPrefixFromStreamLine(line, claudeToolPrefix)
+			}
+			cloned := make([]byte, len(line)+1)
 				copy(cloned, line)
 				cloned[len(line)] = '\n'
 				out <- cliproxyexecutor.StreamChunk{Payload: cloned}
@@ -541,9 +533,6 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			)
 			for i := range chunks {
 				chunkBytes := []byte(chunks[i])
-				if scaleUsage {
-					chunkBytes = scaleUsageForContextLimit(chunkBytes)
-				}
 				out <- cliproxyexecutor.StreamChunk{Payload: chunkBytes}
 			}
 		}
@@ -1008,17 +997,12 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 
 var excludedBetaPrefixes = []string{}
 
-func filterExcludedBetas(betas string, cfg *config.Config) string {
+func filterExcludedBetas(betas string) string {
 	parts := strings.Split(betas, ",")
 	var filtered []string
 	for _, beta := range parts {
 		beta = strings.TrimSpace(beta)
 		if beta == "" {
-			continue
-		}
-
-		// Filter context-1m if enabled in config
-		if cfg != nil && cfg.ClaudeHeaderDefaults.FilterContext1M && beta == "context-1m-2025-08-07" {
 			continue
 		}
 
@@ -1098,7 +1082,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 	baseBetas := "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-2024-07-31," + promptCachingScopeBeta + ",effort-2025-11-24,adaptive-thinking-2026-01-28"
 	if val := strings.TrimSpace(ginHeaders.Get("Anthropic-Beta")); val != "" {
 		// Filter loại bỏ các beta không mong muốn
-		val = filterExcludedBetas(val, cfg)
+		val = filterExcludedBetas(val)
 		if val != "" {
 			baseBetas = val
 		}
@@ -1107,18 +1091,12 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		}
 	}
 
-	hasClaude1MHeader := false
-	if ginHeaders != nil {
-		if _, ok := ginHeaders[textproto.CanonicalMIMEHeaderKey("X-CPA-CLAUDE-1M")]; ok {
-			hasClaude1MHeader = true
-		}
-	}
 	if !strings.Contains(baseBetas, promptCachingScopeBeta) {
 		baseBetas += "," + promptCachingScopeBeta
 	}
 
 	// Merge extra betas from request body and request flags.
-	if len(extraBetas) > 0 || hasClaude1MHeader {
+	if len(extraBetas) > 0 {
 		existingSet := make(map[string]bool)
 		for _, b := range strings.Split(baseBetas, ",") {
 			betaName := strings.TrimSpace(b)
@@ -1131,7 +1109,6 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			if beta == "" || existingSet[beta] {
 				continue
 			}
-			// Kiểm tra beta có bị exclude không
 			excluded := false
 			for _, prefix := range excludedBetaPrefixes {
 				if strings.HasPrefix(beta, prefix) {
@@ -1143,9 +1120,6 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 				baseBetas += "," + beta
 				existingSet[beta] = true
 			}
-		}
-		if hasClaude1MHeader && !existingSet["context-1m-2025-08-07"] {
-			baseBetas += ",context-1m-2025-08-07"
 		}
 	}
 	r.Header.Set("Anthropic-Beta", baseBetas)
@@ -2241,67 +2215,4 @@ func buildSyntheticClaudeStreamLines(model string, errMsg string) [][]byte {
 		[]byte(`data: {"type":"message_stop"}`),
 		[]byte(``),
 	}
-}
-
-const (
-	proxyMaxContext    = 200000
-	cursorPerceivedMax = 1000000
-	usageScaleFactor   = float64(cursorPerceivedMax) / float64(proxyMaxContext) // 5.0
-)
-
-// hasContext1MBeta kiểm tra request gốc (gin context) có chứa beta header context-1m không.
-// Chỉ khi client gửi context-1m beta (Cursor perceive 1M) thì mới cần scale usage x5.
-func hasContext1MBeta(ctx context.Context) bool {
-	ginCtx, ok := ctx.Value("gin").(*gin.Context)
-	if !ok || ginCtx == nil || ginCtx.Request == nil {
-		return false
-	}
-	return strings.Contains(ginCtx.GetHeader("Anthropic-Beta"), "context-1m")
-}
-
-// scaleUsageForContextLimit scale usage x5 để Cursor thấy đúng tỷ lệ context đã dùng.
-// Proxy limit 200K, Cursor hiểu 1M → mỗi token thực tế = 5 token perceived.
-func scaleUsageForContextLimit(data []byte) []byte {
-	if !bytes.Contains(data, []byte(`"usage"`)) {
-		return data
-	}
-
-	trimmed := bytes.TrimSpace(data)
-
-	if bytes.HasPrefix(trimmed, []byte("data:")) {
-		payload := bytes.TrimSpace(trimmed[5:])
-		if len(payload) == 0 || !gjson.ValidBytes(payload) {
-			return data
-		}
-		updated := scaleUsageTokens(payload)
-		if bytes.Equal(payload, updated) {
-			return data
-		}
-		return append([]byte("data: "), updated...)
-	}
-
-	if gjson.ValidBytes(trimmed) {
-		return scaleUsageTokens(trimmed)
-	}
-
-	return data
-}
-
-// scaleUsageTokens scale MỌI token field x5 proportionally.
-// Giữ nguyên cấu trúc cache fields để Cursor tiếp tục track usage qua cache_read/cache_create.
-func scaleUsageTokens(data []byte) []byte {
-	paths := []string{"usage", "message.usage"}
-	fields := []string{"input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"}
-	for _, p := range paths {
-		if !gjson.GetBytes(data, p).Exists() {
-			continue
-		}
-		for _, f := range fields {
-			v := gjson.GetBytes(data, p+"."+f).Int()
-			if v > 0 {
-				data, _ = sjson.SetBytes(data, p+"."+f, int64(float64(v)*usageScaleFactor))
-			}
-		}
-	}
-	return data
 }

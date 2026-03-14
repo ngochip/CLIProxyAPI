@@ -250,8 +250,6 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 			logAmpRouting(RouteTypeModelMapping, modelName, resolvedModel, providerName, requestPath)
 			rewriter := NewResponseRewriter(c.Writer, modelName)
 			c.Writer = rewriter
-			// Filter Anthropic-Beta header only for local handling paths
-			filterAntropicBetaHeader(c)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			handler(c)
 			rewriter.Flush()
@@ -259,26 +257,12 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		} else if len(providers) > 0 {
 			// Log: Using local provider (free)
 			logAmpRouting(RouteTypeLocalProvider, modelName, resolvedModel, providerName, requestPath)
-			// Filter Anthropic-Beta header only for local handling paths
-			filterAntropicBetaHeader(c)
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			handler(c)
 		} else {
 			// No provider, no mapping, no proxy: fall back to the wrapped handler so it can return an error response
 			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 			handler(c)
-		}
-	}
-}
-
-// filterAntropicBetaHeader filters Anthropic-Beta header to remove features requiring special subscription
-// This is needed when using local providers (bypassing the Amp proxy)
-func filterAntropicBetaHeader(c *gin.Context) {
-	if betaHeader := c.Request.Header.Get("Anthropic-Beta"); betaHeader != "" {
-		if filtered := filterBetaFeatures(betaHeader, "context-1m-2025-08-07"); filtered != "" {
-			c.Request.Header.Set("Anthropic-Beta", filtered)
-		} else {
-			c.Request.Header.Del("Anthropic-Beta")
 		}
 	}
 }
