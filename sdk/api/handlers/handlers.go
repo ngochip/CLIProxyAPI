@@ -613,7 +613,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		}
 	}
 	chunks := streamResult.Chunks
-	dataChan := make(chan []byte, 32)
+	dataChan := make(chan []byte, 4)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
 	go func() {
 		defer close(dataChan)

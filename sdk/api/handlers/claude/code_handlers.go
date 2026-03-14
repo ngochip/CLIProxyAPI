@@ -235,6 +235,7 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("X-Accel-Buffering", "no")
 	}
 
 	// Peek at the first chunk to determine success or failure before setting headers
