@@ -20,10 +20,6 @@ func ModelSupportsThinking(model string) bool {
 	if info := registry.LookupStaticModelInfo(model); info != nil {
 		return info.Thinking != nil
 	}
-	// Fallback: check Antigravity static config
-	if cfg := registry.GetAntigravityModelConfig()[model]; cfg != nil {
-		return cfg.Thinking != nil
-	}
 	return false
 }
 
@@ -79,10 +75,6 @@ func thinkingRangeFromRegistry(model string) (found bool, min int, max int, zero
 	// Fallback: check static model definitions
 	if info := registry.LookupStaticModelInfo(model); info != nil && info.Thinking != nil {
 		return true, info.Thinking.Min, info.Thinking.Max, info.Thinking.ZeroAllowed, info.Thinking.DynamicAllowed
-	}
-	// Fallback: check Antigravity static config
-	if cfg := registry.GetAntigravityModelConfig()[model]; cfg != nil && cfg.Thinking != nil {
-		return true, cfg.Thinking.Min, cfg.Thinking.Max, cfg.Thinking.ZeroAllowed, cfg.Thinking.DynamicAllowed
 	}
 	return false, 0, 0, false, false
 }

@@ -90,6 +90,10 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
+	// These are used only when the client does not send its own headers.
+	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
+
 	// ClaudeKey defines a list of Claude API key configurations as specified in the YAML configuration file.
 	ClaudeKey []ClaudeKey `yaml:"claude-api-key" json:"claude-api-key"`
 
@@ -140,6 +144,14 @@ type ClaudeHeaderDefaults struct {
 	// When true, the beta flag is removed to avoid extra usage charges from Anthropic.
 	// When false (default), the beta flag is forwarded as-is from the client.
 	FilterContext1M bool `yaml:"filter-context-1m" json:"filter-context-1m"`
+}
+
+// CodexHeaderDefaults configures fallback header values injected into Codex
+// model requests for OAuth/file-backed auth when the client omits them.
+// UserAgent applies to HTTP and websocket requests; BetaFeatures only applies to websockets.
+type CodexHeaderDefaults struct {
+	UserAgent    string `yaml:"user-agent" json:"user-agent"`
+	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
 // TLSConfig holds HTTPS server settings.
@@ -629,6 +641,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
 
+	// Sanitize Codex header defaults.
+	cfg.SanitizeCodexHeaderDefaults()
+
 	// Sanitize Claude key headers
 	cfg.SanitizeClaudeKeys()
 
@@ -716,6 +731,16 @@ func payloadRawString(value any) ([]byte, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// SanitizeCodexHeaderDefaults trims surrounding whitespace from the
+// configured Codex header fallback values.
+func (cfg *Config) SanitizeCodexHeaderDefaults() {
+	if cfg == nil {
+		return
+	}
+	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
+	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
 }
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.

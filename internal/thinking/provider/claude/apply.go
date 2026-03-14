@@ -295,7 +295,7 @@ func applyCompatibleClaude(body []byte, config thinking.ThinkingConfig) ([]byte,
 		return applySpeed(applyEffort(body, config), config), nil
 	}
 
-	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto {
+	if config.Mode != thinking.ModeBudget && config.Mode != thinking.ModeNone && config.Mode != thinking.ModeAuto && config.Mode != thinking.ModeLevel {
 		return applySpeed(body, config), nil
 	}
 

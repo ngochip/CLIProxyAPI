@@ -43,23 +43,32 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 
 	// Process system messages and convert them to input content format.
 	systemsResult := rootResult.Get("system")
-	if systemsResult.IsArray() {
-		systemResults := systemsResult.Array()
+	if systemsResult.Exists() {
 		message := `{"type":"message","role":"developer","content":[]}`
 		contentIndex := 0
-		for i := 0; i < len(systemResults); i++ {
-			systemResult := systemResults[i]
-			systemTypeResult := systemResult.Get("type")
-			if systemTypeResult.String() == "text" {
-				text := systemResult.Get("text").String()
-				if strings.HasPrefix(text, "x-anthropic-billing-header: ") {
-					continue
+
+		appendSystemText := func(text string) {
+			if text == "" || strings.HasPrefix(text, "x-anthropic-billing-header: ") {
+				return
+			}
+
+			message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", contentIndex), "input_text")
+			message, _ = sjson.Set(message, fmt.Sprintf("content.%d.text", contentIndex), text)
+			contentIndex++
+		}
+
+		if systemsResult.Type == gjson.String {
+			appendSystemText(systemsResult.String())
+		} else if systemsResult.IsArray() {
+			systemResults := systemsResult.Array()
+			for i := 0; i < len(systemResults); i++ {
+				systemResult := systemResults[i]
+				if systemResult.Get("type").String() == "text" {
+					appendSystemText(systemResult.Get("text").String())
 				}
-				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.type", contentIndex), "input_text")
-				message, _ = sjson.Set(message, fmt.Sprintf("content.%d.text", contentIndex), text)
-				contentIndex++
 			}
 		}
+
 		if contentIndex > 0 {
 			template, _ = sjson.SetRaw(template, "input.-1", message)
 		}
@@ -255,6 +264,8 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 			tool, _ = sjson.SetRaw(tool, "parameters", normalizeToolParameters(toolResult.Get("input_schema").Raw))
 			tool, _ = sjson.Delete(tool, "input_schema")
 			tool, _ = sjson.Delete(tool, "parameters.$schema")
+			tool, _ = sjson.Delete(tool, "cache_control")
+			tool, _ = sjson.Delete(tool, "defer_loading")
 			tool, _ = sjson.Set(tool, "strict", false)
 			template, _ = sjson.SetRaw(template, "tools.-1", tool)
 		}
