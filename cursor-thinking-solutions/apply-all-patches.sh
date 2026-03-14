@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 PATCHES=(
   "patch-cursor-thinking.js"
+  "patch-cursor-smooth-streaming.js"
   "patch-cursor-summarize-credentials.js"
   "patch-cursor-subagent-maxmode.js"
 )
