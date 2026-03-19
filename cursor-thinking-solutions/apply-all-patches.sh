@@ -15,6 +15,7 @@ PATCHES=(
   "patch-cursor-smooth-streaming.js"
   "patch-cursor-summarize-credentials.js"
   "patch-cursor-subagent-maxmode.js"
+  "patch-cursor-subagent-credentials.js"
 )
 
 WORKBENCH="/Applications/Cursor.app/Contents/Resources/app/out/vs/workbench/workbench.desktop.main.js"
