@@ -187,6 +187,31 @@ func (s *RateLimitStore) Latest() *RateLimitRecord {
 	return &r
 }
 
+// LatestBySource trả về record mới nhất cho mỗi source (email/key).
+func (s *RateLimitStore) LatestBySource() map[string]*RateLimitRecord {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.records) == 0 {
+		return nil
+	}
+	result := make(map[string]*RateLimitRecord)
+	for i := len(s.records) - 1; i >= 0; i-- {
+		r := s.records[i]
+		source := r.Source
+		if source == "" {
+			source = "unknown"
+		}
+		if _, exists := result[source]; !exists {
+			copy := r
+			result[source] = &copy
+		}
+	}
+	return result
+}
+
 // QueryByWindow trả về aggregated summary cho records trong time window.
 func (s *RateLimitStore) QueryByWindow(d time.Duration) WindowSummary {
 	summary := WindowSummary{
