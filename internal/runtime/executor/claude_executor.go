@@ -22,6 +22,7 @@ import (
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -134,6 +135,9 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+
+	// Clamp max_tokens based on client API key ownership
+	body = clampMaxTokensForClient(ctx, e.cfg, baseModel, body)
 
 	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
 	body = ensureMaxTokensForThinking(baseModel, body)
@@ -336,6 +340,9 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+
+	// Clamp max_tokens based on client API key ownership
+	body = clampMaxTokensForClient(ctx, e.cfg, baseModel, body)
 
 	// Ensure max_tokens > thinking.budget_tokens when thinking is enabled
 	body = ensureMaxTokensForThinking(baseModel, body)
@@ -738,6 +745,54 @@ func extractAndRemoveBetas(body []byte) ([]string, []byte) {
 	}
 	body, _ = sjson.DeleteBytes(body, "betas")
 	return betas, body
+}
+
+// clampMaxTokensForClient enforces max_tokens limits based on client API key ownership.
+// Owner keys: max_tokens is set to model's MaxCompletionTokens (or clamped if it exceeds).
+// Non-owner keys: max_tokens is capped at the configurable MaxTokensCap (default 16384).
+// Model limit always wins — max_tokens never exceeds ModelInfo.MaxCompletionTokens.
+func clampMaxTokensForClient(ctx context.Context, cfg *config.Config, baseModel string, body []byte) []byte {
+	if cfg == nil {
+		return body
+	}
+	modelInfo := registry.LookupModelInfo(baseModel, "claude")
+	modelMax := 0
+	if modelInfo != nil && modelInfo.MaxCompletionTokens > 0 {
+		modelMax = modelInfo.MaxCompletionTokens
+	}
+	if modelMax == 0 {
+		return body
+	}
+
+	clientKey := apiKeyFromContext(ctx)
+	isOwner := cfg.IsOwnerAPIKey(clientKey)
+	maxTokens := int(gjson.GetBytes(body, "max_tokens").Int())
+
+	if isOwner {
+		if maxTokens == 0 || maxTokens > modelMax {
+			body, _ = sjson.SetBytes(body, "max_tokens", modelMax)
+			log.WithFields(log.Fields{
+				"model":      baseModel,
+				"original":   maxTokens,
+				"clamped_to": modelMax,
+			}).Debug("clampMaxTokens: owner key, set to model max |")
+		}
+	} else {
+		cap := cfg.GetMaxTokensCap()
+		if cap > modelMax {
+			cap = modelMax
+		}
+		if maxTokens == 0 || maxTokens > cap {
+			body, _ = sjson.SetBytes(body, "max_tokens", cap)
+			log.WithFields(log.Fields{
+				"model":      baseModel,
+				"original":   maxTokens,
+				"clamped_to": cap,
+				"is_owner":   false,
+			}).Debug("clampMaxTokens: non-owner key, capped |")
+		}
+	}
+	return body
 }
 
 // ensureMaxTokensForThinking ensures max_tokens > thinking.budget_tokens when thinking is enabled.

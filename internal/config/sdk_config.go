@@ -20,6 +20,14 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// OwnerAPIKeys is a subset of APIKeys that receive full model limits for max_tokens.
+	// Non-owner keys are capped at MaxTokensCap.
+	OwnerAPIKeys []string `yaml:"owner-api-keys" json:"owner-api-keys"`
+
+	// MaxTokensCap is the max_tokens ceiling for non-owner API keys (default: 16384).
+	// Owner keys always get the model's MaxCompletionTokens instead.
+	MaxTokensCap int `yaml:"max-tokens-cap" json:"max-tokens-cap"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -30,6 +38,27 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+const defaultMaxTokensCap = 16384
+
+// IsOwnerAPIKey reports whether key is listed in OwnerAPIKeys.
+// When OwnerAPIKeys is empty, all keys are treated as non-owner.
+func (c *SDKConfig) IsOwnerAPIKey(key string) bool {
+	for _, k := range c.OwnerAPIKeys {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+// GetMaxTokensCap returns the max_tokens ceiling for non-owner API keys.
+func (c *SDKConfig) GetMaxTokensCap() int {
+	if c.MaxTokensCap > 0 {
+		return c.MaxTokensCap
+	}
+	return defaultMaxTokensCap
 }
 
 // StreamingConfig holds server streaming behavior configuration.

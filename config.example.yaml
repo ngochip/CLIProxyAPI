@@ -49,6 +49,15 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Owner API keys get maximum model limits for max_tokens (e.g., 128K for Claude Opus 4.6).
+# Must also be listed in api-keys above. Non-owner keys are capped at max-tokens-cap.
+# owner-api-keys:
+#   - "your-api-key-1"
+
+# Max tokens cap for non-owner API keys (default: 16384).
+# Owner keys always receive the model's full max_completion_tokens instead.
+# max-tokens-cap: 16384
+
 # Enable debug logging
 debug: false
 
