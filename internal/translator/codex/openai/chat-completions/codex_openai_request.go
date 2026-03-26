@@ -119,15 +119,23 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 
 			switch role {
 			case "tool":
-				// Handle tool response messages as top-level function_call_output objects
+				// Handle tool response messages as top-level function_call_output objects.
+				// Preserve structured content arrays so custom tool results round-trip cleanly.
 				toolCallID := m.Get("tool_call_id").String()
-				content := m.Get("content").String()
+				content := m.Get("content")
 
-				// Create function_call_output object
 				funcOutput := `{}`
 				funcOutput, _ = sjson.Set(funcOutput, "type", "function_call_output")
 				funcOutput, _ = sjson.Set(funcOutput, "call_id", toolCallID)
-				funcOutput, _ = sjson.Set(funcOutput, "output", content)
+				if content.Exists() {
+					if content.IsArray() || content.IsObject() {
+						funcOutput, _ = sjson.SetRaw(funcOutput, "output", content.Raw)
+					} else {
+						funcOutput, _ = sjson.Set(funcOutput, "output", content.String())
+					}
+				} else {
+					funcOutput, _ = sjson.Set(funcOutput, "output", "")
+				}
 				out, _ = sjson.SetRaw(out, "input.-1", funcOutput)
 
 			default:

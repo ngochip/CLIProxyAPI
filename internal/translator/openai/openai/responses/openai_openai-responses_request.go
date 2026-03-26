@@ -123,6 +123,50 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 				out, _ = sjson.SetRaw(out, "messages.-1", message)
 
+			case "custom_tool_call":
+				// Map custom tool calls to Chat Completions tool_calls so downstream OpenAI/Codex
+				// translators can round-trip tool execution results. The custom tool payload is
+				// carried in function.arguments.
+				assistantMessage := `{"role":"assistant","tool_calls":[]}`
+
+				toolCall := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
+
+				if callId := item.Get("call_id"); callId.Exists() {
+					toolCall, _ = sjson.Set(toolCall, "id", callId.String())
+				}
+
+				if name := item.Get("name"); name.Exists() {
+					toolCall, _ = sjson.Set(toolCall, "function.name", name.String())
+				}
+
+				if input := item.Get("input"); input.Exists() {
+					toolCall, _ = sjson.Set(toolCall, "function.arguments", input.String())
+				}
+
+				assistantMessage, _ = sjson.SetRaw(assistantMessage, "tool_calls.0", toolCall)
+				out, _ = sjson.SetRaw(out, "messages.-1", assistantMessage)
+
+			case "custom_tool_call_output":
+				// Preserve structured tool output so the next translator can emit a proper
+				// function_call_output item back to the Responses API.
+				toolMessage := `{"role":"tool","tool_call_id":""}`
+
+				if callId := item.Get("call_id"); callId.Exists() {
+					toolMessage, _ = sjson.Set(toolMessage, "tool_call_id", callId.String())
+				}
+
+				if output := item.Get("output"); output.Exists() {
+					if output.IsArray() || output.IsObject() {
+						toolMessage, _ = sjson.SetRaw(toolMessage, "content", output.Raw)
+					} else {
+						toolMessage, _ = sjson.Set(toolMessage, "content", output.String())
+					}
+				} else {
+					toolMessage, _ = sjson.Set(toolMessage, "content", "")
+				}
+
+				out, _ = sjson.SetRaw(out, "messages.-1", toolMessage)
+
 			case "function_call":
 				// Handle function call conversion to assistant message with tool_calls
 				assistantMessage := `{"role":"assistant","tool_calls":[]}`

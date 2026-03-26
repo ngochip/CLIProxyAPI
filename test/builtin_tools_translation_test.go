@@ -77,3 +77,37 @@ func TestOpenAIResponsesToOpenAI_PreservesNonFunctionToolsAndFiles(t *testing.T)
 		t.Fatalf("expected filename preserved, got %q: %s", got, string(out))
 	}
 }
+
+
+func TestOpenAIResponsesToOpenAI_RoundTripsCustomToolCallOutputs(t *testing.T) {
+	in := []byte(`{
+		"model":"gpt-5",
+		"input":[
+			{"role":"user","content":[{"type":"input_text","text":"edit file"}]},
+			{"type":"custom_tool_call","call_id":"call_patch_1","name":"ApplyPatch","input":"*** Begin Patch\n*** Update File: /tmp/test.txt\n*** End Patch\n"},
+			{"type":"custom_tool_call_output","call_id":"call_patch_1","output":[{"type":"input_text","text":"OK"}]}
+		],
+		"tools":[{"type":"custom","name":"ApplyPatch","description":"patch tool","format":{"type":"grammar","syntax":"lark"}}]
+	}`)
+
+	out := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "gpt-5", in, false)
+
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "assistant" {
+		t.Fatalf("expected messages.1.role=assistant, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_calls.0.id").String(); got != "call_patch_1" {
+		t.Fatalf("expected tool call id preserved, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_calls.0.function.name").String(); got != "ApplyPatch" {
+		t.Fatalf("expected tool name preserved, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "tool" {
+		t.Fatalf("expected messages.2.role=tool, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.tool_call_id").String(); got != "call_patch_1" {
+		t.Fatalf("expected tool_call_id preserved, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.2.content.0.text").String(); got != "OK" {
+		t.Fatalf("expected tool output preserved, got %q: %s", got, string(out))
+	}
+}
