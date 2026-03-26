@@ -94,6 +94,18 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 							contentPart := `{"type":"image_url","image_url":{"url":""}}`
 							contentPart, _ = sjson.Set(contentPart, "image_url.url", imageURL)
 							message, _ = sjson.SetRaw(message, "content.-1", contentPart)
+						case "input_file":
+							contentPart := `{"type":"file","file":{}}`
+							if fileID := contentItem.Get("file_id"); fileID.Exists() {
+								contentPart, _ = sjson.Set(contentPart, "file.file_id", fileID.String())
+							}
+							if fileData := contentItem.Get("file_data"); fileData.Exists() {
+								contentPart, _ = sjson.Set(contentPart, "file.file_data", fileData.String())
+							}
+							if filename := contentItem.Get("filename"); filename.Exists() {
+								contentPart, _ = sjson.Set(contentPart, "file.filename", filename.String())
+							}
+							message, _ = sjson.SetRaw(message, "content.-1", contentPart)
 						}
 						return true
 					})
@@ -161,18 +173,17 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		var chatCompletionsTools []interface{}
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
+			// Preserve non-function tools as-is so Cursor custom/built-in tools are not lost
+			// when Responses-style payloads are sent to /v1/chat/completions.
 			toolType := tool.Get("type").String()
 			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
+				chatCompletionsTools = append(chatCompletionsTools, tool.Value())
 				return true
 			}
 
 			chatTool := `{"type":"function","function":{}}`
 
-			// Convert tool structure from responses format to chat completions format
+			// Convert tool structure from responses format to chat completions format.
 			function := `{"name":"","description":"","parameters":{}}`
 
 			if name := tool.Get("name"); name.Exists() {
@@ -185,6 +196,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 			if parameters := tool.Get("parameters"); parameters.Exists() {
 				function, _ = sjson.SetRaw(function, "parameters", parameters.Raw)
+			}
+
+			if strict := tool.Get("strict"); strict.Exists() {
+				function, _ = sjson.Set(function, "strict", strict.Value())
 			}
 
 			chatTool, _ = sjson.SetRaw(chatTool, "function", function)

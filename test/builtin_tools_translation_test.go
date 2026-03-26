@@ -33,16 +33,47 @@ func TestOpenAIToCodex_PreservesBuiltinTools(t *testing.T) {
 	}
 }
 
-func TestOpenAIResponsesToOpenAI_IgnoresBuiltinTools(t *testing.T) {
+func TestOpenAIResponsesToOpenAI_PreservesNonFunctionToolsAndFiles(t *testing.T) {
 	in := []byte(`{
 		"model":"gpt-5",
-		"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}],
-		"tools":[{"type":"web_search","search_context_size":"low"}]
+		"input":[
+			{"role":"user","content":[
+				{"type":"input_text","text":"hi"},
+				{"type":"input_image","image_url":"https://example.com/image.png"},
+				{"type":"input_file","file_id":"file-123","filename":"spec.pdf"}
+			]}
+		],
+		"tools":[
+			{"type":"web_search","search_context_size":"low"},
+			{"type":"custom","name":"ApplyPatch","description":"patch tool","format":{"type":"grammar","syntax":"lark"}},
+			{"type":"function","name":"ReadFile","description":"read file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},"strict":false}
+		]
 	}`)
 
 	out := sdktranslator.TranslateRequest(sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "gpt-5", in, false)
 
-	if got := gjson.GetBytes(out, "tools.#").Int(); got != 0 {
-		t.Fatalf("expected 0 tools (builtin tools not supported in Chat Completions), got %d: %s", got, string(out))
+	if got := gjson.GetBytes(out, "tools.#").Int(); got != 3 {
+		t.Fatalf("expected 3 tools, got %d: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.0.type").String(); got != "web_search" {
+		t.Fatalf("expected tools[0].type=web_search, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.1.type").String(); got != "custom" {
+		t.Fatalf("expected tools[1].type=custom, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.1.name").String(); got != "ApplyPatch" {
+		t.Fatalf("expected tools[1].name=ApplyPatch, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "tools.2.function.strict").Bool(); got != false {
+		t.Fatalf("expected function strict=false, got %v: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.image_url.url").String(); got != "https://example.com/image.png" {
+		t.Fatalf("expected image URL preserved, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.2.file.file_id").String(); got != "file-123" {
+		t.Fatalf("expected file_id preserved, got %q: %s", got, string(out))
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.2.file.filename").String(); got != "spec.pdf" {
+		t.Fatalf("expected filename preserved, got %q: %s", got, string(out))
 	}
 }

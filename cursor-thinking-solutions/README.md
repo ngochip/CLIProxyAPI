@@ -27,9 +27,10 @@ Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 ## Patch Status (Cursor 2.6.19)
 
 | Patch | Trạng thái | Ghi chú |
-|-------|-----------|---------|
+|-------|-----------|---------| 
 | Thinking blocks (`<think>` tags) | **Active** — cần patch | Cursor chưa support natively |
 | Summarize credentials | **Active** — cần patch | Custom OpenAI creds cho summarization |
+| BugBot credentials (Agent Review) | **Active** — cần patch | Custom OpenAI creds cho Agent Review |
 | Subagent credentials | **Không cần** | Cursor ≥ 2.6.11 đã fix natively |
 | Subagent maxMode (thinking) | **Không cần** | Cursor ≥ 2.6.19 đã fix natively |
 
@@ -71,7 +72,19 @@ handleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolCalls()
 
 **Giải pháp:** Patch `ModelDetails` class để đọc custom OpenAI credentials từ `reactiveStorageService` và dùng cho summarize requests.
 
-### 3. Sub-agent maxMode Patch (`patch-cursor-subagent-maxmode.js`) — DEPRECATED
+### 3. BugBot Credentials Patch (`patch-cursor-bugbot-credentials.js`)
+
+**Vấn đề:** Agent Review (BugBot) không dùng custom OpenAI credentials. Request `StreamBugBotRequest` có field `model_details` nhưng client không set nó → server dùng default model.
+
+**Giải pháp:** Patch `gTt()` (runEditorBugbot) để inject `modelDetails` vào `StreamBugBotRequest`:
+1. Auto-detect aiService service ID (`Ti("aiService")`)
+2. Dùng `instantiationService.invokeFunction` để get aiService
+3. Gọi `getModelDetails({specificModelField:"composer"})` để lấy credentials
+4. Tạo `ModelDetails` object với credentials và inject vào request
+
+**Lưu ý:** Server có thể ignore `model_details` cho BugBot — patch này là experimental. Nếu server không respect model_details, Agent Review vẫn chạy bình thường với Cursor default.
+
+### 4. Sub-agent maxMode Patch (`patch-cursor-subagent-maxmode.js`) — DEPRECATED
 
 **Trạng thái:** Không cần từ Cursor ≥ 2.6.19. Script tự detect và skip.
 
@@ -83,7 +96,7 @@ const m = d ? this._composerDataService.getComposerData(d)?.modelConfig?.maxMode
 new Yf({modelName:e.modelId, maxMode:m, ...Qty(e.credentials)});
 ```
 
-### 4. Sub-agent Credentials Patch (`patch-cursor-subagent-credentials.js`) — DEPRECATED
+### 5. Sub-agent Credentials Patch (`patch-cursor-subagent-credentials.js`) — DEPRECATED
 
 **Trạng thái:** Không cần từ Cursor ≥ 2.6.11. Giữ lại để reference.
 
@@ -161,6 +174,7 @@ Xem [CURSOR-ARCHITECTURE.md](CURSOR-ARCHITECTURE.md) cho tài liệu chi tiết 
 | `check-patch-status.js` | Status checker (dùng bởi apply-all-patches.sh) |
 | `patch-cursor-thinking.js` | Patch thinking block display |
 | `patch-cursor-summarize-credentials.js` | Patch summarize dùng custom OpenAI creds |
+| `patch-cursor-bugbot-credentials.js` | Patch Agent Review dùng custom OpenAI creds |
 | `patch-cursor-subagent-maxmode.js` | ~~Patch sub-agent maxMode~~ (deprecated, Cursor fixed natively) |
 | `patch-cursor-subagent-credentials.js` | ~~Patch sub-agent credentials~~ (deprecated, Cursor fixed natively) |
 | `cursor_thinking-solutions.md` | Transcript of original debugging session |

@@ -24,6 +24,10 @@ const patches = [
     marker:
       "_creds_s=this.reactiveStorageService.applicationUserPersistentStorage",
   },
+  {
+    name: "BugBot credentials (Agent Review)",
+    marker: "_bb_ai=n.instantiationService.invokeFunction",
+  },
   { name: "Subagent credentials", marker: null, note: "Cursor fixed natively" },
   {
     name: "Subagent maxMode (thinking)",
