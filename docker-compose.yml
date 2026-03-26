@@ -9,7 +9,7 @@ services:
         VERSION: ${VERSION:-dev}
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
-    container_name: cli-proxy-api
+    container_name: cli-proxy-api-ngoc
     # env_file:
     #   - .env
     environment:
@@ -17,7 +17,7 @@ services:
     ports:
       - "8318:8317"    # HTTPS port (main server with TLS)
       # - "8085:8085"
-      - "1455:1455"
+      - "1456:1455"
       # - "54545:54545"
       # - "51121:51121"
       # - "11451:11451"
