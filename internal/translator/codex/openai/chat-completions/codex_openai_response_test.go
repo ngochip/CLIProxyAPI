@@ -23,7 +23,7 @@ func TestConvertCodexResponseToOpenAI_StreamSetsModelFromResponseCreated(t *test
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	gotModel := gjson.Get(out[0], "model").String()
+	gotModel := gjson.GetBytes(out[0], "model").String()
 	if gotModel != modelName {
 		t.Fatalf("expected model %q, got %q", modelName, gotModel)
 	}
@@ -40,12 +40,11 @@ func TestConvertCodexResponseToOpenAI_FirstChunkUsesRequestModelName(t *testing.
 		t.Fatalf("expected 1 chunk, got %d", len(out))
 	}
 
-	gotModel := gjson.Get(out[0], "model").String()
+	gotModel := gjson.GetBytes(out[0], "model").String()
 	if gotModel != modelName {
 		t.Fatalf("expected model %q, got %q", modelName, gotModel)
 	}
 }
-
 
 func TestConvertCodexResponseToOpenAI_CustomToolCallStreaming(t *testing.T) {
 	ctx := context.Background()
@@ -62,10 +61,10 @@ func TestConvertCodexResponseToOpenAI_CustomToolCallStreaming(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("expected 1 chunk for custom tool call add, got %d", len(out))
 	}
-	if got := gjson.Get(out[0], "choices.0.delta.tool_calls.0.id").String(); got != "call_1" {
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.id").String(); got != "call_1" {
 		t.Fatalf("expected tool call id call_1, got %q: %s", got, out[0])
 	}
-	if got := gjson.Get(out[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "ApplyPatch" {
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.name").String(); got != "ApplyPatch" {
 		t.Fatalf("expected tool name ApplyPatch, got %q: %s", got, out[0])
 	}
 
@@ -73,7 +72,7 @@ func TestConvertCodexResponseToOpenAI_CustomToolCallStreaming(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("expected 1 chunk for custom tool call delta, got %d", len(out))
 	}
-	if got := gjson.Get(out[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "*** Begin Patch\n" {
+	if got := gjson.GetBytes(out[0], "choices.0.delta.tool_calls.0.function.arguments").String(); got != "*** Begin Patch\n" {
 		t.Fatalf("expected custom tool delta in arguments, got %q: %s", got, out[0])
 	}
 
@@ -86,7 +85,7 @@ func TestConvertCodexResponseToOpenAI_CustomToolCallStreaming(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("expected 1 chunk for response.completed, got %d", len(out))
 	}
-	if got := gjson.Get(out[0], "choices.0.finish_reason").String(); got != "tool_calls" {
+	if got := gjson.GetBytes(out[0], "choices.0.finish_reason").String(); got != "tool_calls" {
 		t.Fatalf("expected finish_reason tool_calls, got %q: %s", got, out[0])
 	}
 }

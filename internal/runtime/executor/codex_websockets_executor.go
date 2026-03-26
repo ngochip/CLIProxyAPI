@@ -343,7 +343,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 			}
 			var param any
 			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
-			resp = cliproxyexecutor.Response{Payload: []byte(out)}
+			resp = cliproxyexecutor.Response{Payload: out}
 			return resp, nil
 		}
 	}
@@ -592,7 +592,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			line := encodeCodexWebsocketAsSSE(payload)
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, body, body, line, &param)
 			for i := range chunks {
-				if !send(cliproxyexecutor.StreamChunk{Payload: []byte(chunks[i])}) {
+				if !send(cliproxyexecutor.StreamChunk{Payload: chunks[i]}) {
 					terminateReason = "context_done"
 					terminateErr = ctx.Err()
 					return
@@ -814,9 +814,10 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
+	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
 	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
+	misc.EnsureHeader(headers, ginHeaders, "Version", "")
 
-	misc.EnsureHeader(headers, ginHeaders, "Version", codexClientVersion)
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
 	if betaHeader == "" && ginHeaders != nil {
 		betaHeader = strings.TrimSpace(ginHeaders.Get("OpenAI-Beta"))
@@ -834,8 +835,12 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 			isAPIKey = true
 		}
 	}
+	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
+		headers.Set("Originator", originator)
+	} else if !isAPIKey {
+		headers.Set("Originator", codexOriginator)
+	}
 	if !isAPIKey {
-		headers.Set("Originator", "codex_cli_rs")
 		if auth != nil && auth.Metadata != nil {
 			if accountID, ok := auth.Metadata["account_id"].(string); ok {
 				if trimmed := strings.TrimSpace(accountID); trimmed != "" {
