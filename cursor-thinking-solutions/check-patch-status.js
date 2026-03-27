@@ -28,12 +28,10 @@ const patches = [
     name: "BugBot credentials (Agent Review)",
     marker: "_bb_ai=n.instantiationService.invokeFunction",
   },
-  { name: "Subagent credentials", marker: null, note: "Cursor fixed natively" },
   {
-    name: "Subagent maxMode (thinking)",
-    patchMarker:
-      'maxMode:this._modelConfigService.getModelConfig("composer").maxMode',
-    nativeMarker: "modelConfig?.maxMode",
+    name: "Subagent credentials",
+    marker:
+      '_d=this._aiService.getModelDetails({specificModelField:"composer"})',
   },
 ];
 

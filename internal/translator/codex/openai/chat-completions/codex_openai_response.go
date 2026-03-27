@@ -27,6 +27,7 @@ type ConvertCliToOpenAIParams struct {
 	HasReceivedArgumentsDelta bool
 	HasToolCallAnnounced      bool
 	CurrentToolCallType       string
+	SuppressTextAfterToolCall bool
 }
 
 // ConvertCodexResponseToOpenAI translates a single chunk of a streaming response from the
@@ -53,6 +54,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 			HasReceivedArgumentsDelta: false,
 			HasToolCallAnnounced:      false,
 			CurrentToolCallType:       "",
+			SuppressTextAfterToolCall: false,
 		}
 	}
 
@@ -110,14 +112,26 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 	}
 
 	if dataType == "response.reasoning_summary_text.delta" {
+		if (*param).(*ConvertCliToOpenAIParams).SuppressTextAfterToolCall {
+			return [][]byte{}
+		}
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", deltaResult.String())
 		}
 	} else if dataType == "response.reasoning_summary_text.done" {
+		if (*param).(*ConvertCliToOpenAIParams).SuppressTextAfterToolCall {
+			return [][]byte{}
+		}
 		template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 		template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", "\n\n")
 	} else if dataType == "response.output_text.delta" {
+		// Claude stops the assistant turn once a tool_use starts. Mirror that behavior
+		// for Codex/OpenAI so Cursor does not keep rendering assistant chatter after a
+		// sub-agent/tool call has already been emitted.
+		if (*param).(*ConvertCliToOpenAIParams).SuppressTextAfterToolCall {
+			return [][]byte{}
+		}
 		if deltaResult := rootResult.Get("delta"); deltaResult.Exists() {
 			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			template, _ = sjson.SetBytes(template, "choices.0.delta.content", deltaResult.String())
@@ -141,6 +155,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 		(*param).(*ConvertCliToOpenAIParams).HasReceivedArgumentsDelta = false
 		(*param).(*ConvertCliToOpenAIParams).HasToolCallAnnounced = true
 		(*param).(*ConvertCliToOpenAIParams).CurrentToolCallType = itemType
+		(*param).(*ConvertCliToOpenAIParams).SuppressTextAfterToolCall = true
 
 		functionCallItemTemplate := []byte(`{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
@@ -200,6 +215,7 @@ func ConvertCodexResponseToOpenAI(_ context.Context, modelName string, originalR
 
 		// Fallback path: model skipped output_item.added, so emit complete tool call now.
 		(*param).(*ConvertCliToOpenAIParams).FunctionCallIndex++
+		(*param).(*ConvertCliToOpenAIParams).SuppressTextAfterToolCall = true
 
 		functionCallItemTemplate := []byte(`{"index":0,"id":"","type":"function","function":{"name":"","arguments":""}}`)
 		functionCallItemTemplate, _ = sjson.SetBytes(functionCallItemTemplate, "index", (*param).(*ConvertCliToOpenAIParams).FunctionCallIndex)
@@ -290,6 +306,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 	// Process the output array for content and function calls
 	outputResult := responseResult.Get("output")
+	hasToolCalls := false
 	if outputResult.IsArray() {
 		outputArray := outputResult.Array()
 		var contentText string
@@ -322,8 +339,8 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 						}
 					}
 				}
-			case "function_call":
-				// Handle function call content
+			case "function_call", "custom_tool_call":
+				// Handle function and custom tool call content uniformly for Chat Completions clients.
 				functionCallTemplate := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
 				if callIdResult := outputItem.Get("call_id"); callIdResult.Exists() {
@@ -339,7 +356,11 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", n)
 				}
 
-				if argsResult := outputItem.Get("arguments"); argsResult.Exists() {
+				argField := "arguments"
+				if outputType == "custom_tool_call" {
+					argField = "input"
+				}
+				if argsResult := outputItem.Get(argField); argsResult.Exists() {
 					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.arguments", argsResult.String())
 				}
 
@@ -360,6 +381,7 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 
 		// Add tool calls if any
 		if len(toolCalls) > 0 {
+			hasToolCalls = true
 			template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls", []byte(`[]`))
 			for _, toolCall := range toolCalls {
 				template, _ = sjson.SetRawBytes(template, "choices.0.message.tool_calls.-1", toolCall)
@@ -372,8 +394,12 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	if statusResult := responseResult.Get("status"); statusResult.Exists() {
 		status := statusResult.String()
 		if status == "completed" {
-			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", "stop")
-			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", "stop")
+			finishReason := "stop"
+			if hasToolCalls {
+				finishReason = "tool_calls"
+			}
+			template, _ = sjson.SetBytes(template, "choices.0.finish_reason", finishReason)
+			template, _ = sjson.SetBytes(template, "choices.0.native_finish_reason", finishReason)
 		}
 	}
 

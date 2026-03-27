@@ -184,7 +184,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if err != nil {
 		return resp, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -388,7 +388,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if err != nil {
 		return nil, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, true, extraBetas, e.cfg, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -587,7 +587,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
-	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg)
+	applyClaudeHeaders(httpReq, auth, apiKey, false, extraBetas, e.cfg, baseModel)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -1049,6 +1049,20 @@ func decodeResponseBody(body io.ReadCloser, contentEncoding string) (io.ReadClos
 
 var excludedBetaPrefixes = []string{}
 
+// stripBetasByPrefix loại bỏ tất cả beta có prefix chỉ định khỏi chuỗi comma-separated.
+func stripBetasByPrefix(betas string, prefix string) string {
+	parts := strings.Split(betas, ",")
+	var filtered []string
+	for _, beta := range parts {
+		beta = strings.TrimSpace(beta)
+		if beta == "" || strings.HasPrefix(beta, prefix) {
+			continue
+		}
+		filtered = append(filtered, beta)
+	}
+	return strings.Join(filtered, ",")
+}
+
 func filterExcludedBetas(betas string) string {
 	parts := strings.Split(betas, ",")
 	var filtered []string
@@ -1071,7 +1085,7 @@ func filterExcludedBetas(betas string) string {
 	}
 	return strings.Join(filtered, ",")
 }
-func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config) {
+func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string, stream bool, extraBetas []string, cfg *config.Config, baseModel ...string) {
 	hdrDefault := func(cfgVal, fallback string) string {
 		if cfgVal != "" {
 			return cfgVal
@@ -1148,6 +1162,11 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 			}
 		}
 	}
+	// Strip context-1m beta cho models không support (chỉ Opus hỗ trợ 1M context)
+	if len(baseModel) > 0 && baseModel[0] != "" && !strings.Contains(strings.ToLower(baseModel[0]), "opus") {
+		baseBetas = stripBetasByPrefix(baseBetas, "context-1m")
+	}
+
 	r.Header.Set("Anthropic-Beta", baseBetas)
 
 	misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Version", "2023-06-01")

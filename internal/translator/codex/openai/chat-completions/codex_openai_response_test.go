@@ -89,3 +89,52 @@ func TestConvertCodexResponseToOpenAI_CustomToolCallStreaming(t *testing.T) {
 		t.Fatalf("expected finish_reason tool_calls, got %q: %s", got, out[0])
 	}
 }
+
+
+func TestConvertCodexResponseToOpenAI_SuppressesTextAfterToolCall(t *testing.T) {
+	ctx := context.Background()
+	var param any
+	modelName := "gpt-5.4"
+	originalReq := []byte(`{"tools":[{"type":"function","function":{"name":"Subagent","parameters":{"type":"object"}}}]}`)
+
+	out := ConvertCodexResponseToOpenAI(ctx, modelName, originalReq, nil, []byte(`data: {"type":"response.created","response":{"id":"resp_123","created_at":1700000000,"model":"gpt-5.4"}}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("expected no output for response.created, got %d", len(out))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, modelName, originalReq, nil, []byte(`data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","call_id":"call_sub_1","arguments":"","name":"Subagent"},"output_index":0}`), &param)
+	if len(out) != 1 {
+		t.Fatalf("expected tool call chunk, got %d", len(out))
+	}
+
+	out = ConvertCodexResponseToOpenAI(ctx, modelName, originalReq, nil, []byte(`data: {"type":"response.output_text.delta","delta":"toi se tiep tuc noi du"}`), &param)
+	if len(out) != 0 {
+		t.Fatalf("expected text delta after tool call to be suppressed, got %d: %s", len(out), out[0])
+	}
+}
+
+func TestConvertCodexResponseToOpenAINonStream_CustomToolCallFinishReason(t *testing.T) {
+	raw := []byte(`{
+		"type":"response.completed",
+		"response":{
+			"id":"resp_1",
+			"created_at":1700000000,
+			"model":"gpt-5.4",
+			"status":"completed",
+			"output":[
+				{"type":"custom_tool_call","call_id":"call_patch_1","name":"ApplyPatch","input":"*** Begin Patch\n*** End Patch\n"}
+			]
+		}
+	}`)
+	originalReq := []byte(`{"tools":[{"type":"custom","name":"ApplyPatch"}]}`)
+	out := ConvertCodexResponseToOpenAINonStream(context.Background(), "", originalReq, nil, raw, nil)
+	if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "tool_calls" {
+		t.Fatalf("expected finish_reason tool_calls, got %q: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.name").String(); got != "ApplyPatch" {
+		t.Fatalf("expected custom tool name preserved, got %q: %s", got, out)
+	}
+	if got := gjson.GetBytes(out, "choices.0.message.tool_calls.0.function.arguments").String(); got != "*** Begin Patch\n*** End Patch\n" {
+		t.Fatalf("expected custom tool input mapped to arguments, got %q: %s", got, out)
+	}
+}

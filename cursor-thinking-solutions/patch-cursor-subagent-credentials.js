@@ -4,10 +4,11 @@
  * Patch Cursor IDE workbench để sub-agents kế thừa custom OpenAI base URL và API key
  * từ parent conversation.
  *
- * Root cause: _runSubagent tạo model details object thiếu apiKey và openaiApiBaseUrl,
+ * Root cause: createOrResumeSubagent tạo model config object thiếu apiKey và openaiApiBaseUrl,
  * khiến sub-agents luôn dùng Cursor default API thay vì custom proxy.
  *
- * Fix: Inject credentials từ parent model vào Xf constructor bằng spread operator.
+ * Fix: Inject credentials từ parent model vào model config bằng spread operator.
+ * Hỗ trợ cả Cursor ≥ 0.50 (getModelConfig spread) và < 0.50 (literal object).
  *
  * Usage: node patch-cursor-subagent-credentials.js [--restore]
  *   --restore: Khôi phục file gốc từ backup
@@ -79,16 +80,24 @@ if (data.includes(PATCH_MARKER)) {
   process.exit(0);
 }
 
-// Search pattern: duy nhất 1 occurrence trong _runSubagent method
-// Pattern này version-independent (không dùng minified class names)
-const ORIGINAL = "modelName:e.modelId,maxMode:!1}";
+// Cursor ≥ 0.50: dùng _modelConfigService.getModelConfig("composer") spread
+const PATTERN_V2 = '...this._modelConfigService.getModelConfig("composer"),modelName:e.modelId}';
+// Cursor < 0.50: dùng object literal trực tiếp
+const PATTERN_V1 = "modelName:e.modelId,maxMode:!1}";
 
-const idx = data.indexOf(ORIGINAL);
-if (idx === -1) {
+let ORIGINAL;
+if (data.includes(PATTERN_V2)) {
+  ORIGINAL = PATTERN_V2;
+  console.log("   Detected Cursor ≥ 0.50 pattern (getModelConfig spread)");
+} else if (data.includes(PATTERN_V1)) {
+  ORIGINAL = PATTERN_V1;
+  console.log("   Detected Cursor < 0.50 pattern (literal object)");
+} else {
   console.error(
     "❌ Target pattern not found. Cursor version may be incompatible."
   );
-  console.error('   Pattern: "' + ORIGINAL + '"');
+  console.error('   Tried V2: "' + PATTERN_V2 + '"');
+  console.error('   Tried V1: "' + PATTERN_V1 + '"');
   console.error("");
   console.error("   Debug: tìm _runSubagent trong workbench để xác định pattern mới:");
   console.error(
@@ -98,6 +107,8 @@ if (idx === -1) {
   );
   process.exit(1);
 }
+
+const idx = data.indexOf(ORIGINAL);
 
 // Verify uniqueness
 let count = 0;
@@ -127,21 +138,29 @@ if (!fs.existsSync(PRODUCT_BACKUP)) {
 /**
  * Patch strategy:
  *
- * ORIGINAL (trong _runSubagent):
- *   new Xf({modelName:e.modelId,maxMode:!1})
+ * Inject credentials (apiKey, openaiApiBaseUrl, azureState, bedrockState) từ
+ * _aiService.getModelDetails vào model config object cho sub-agent.
  *
- * PATCHED:
- *   new Xf({modelName:e.modelId,maxMode:!1,...(()=>{try{const _d=...getModelDetails...;
- *     return{apiKey:_d?.apiKey,openaiApiBaseUrl:_d?.openaiApiBaseUrl,
- *            azureState:_d?.azureState,bedrockState:_d?.bedrockState}}catch(_e){return{}}})()})
+ * V2 (Cursor ≥ 0.50):
+ *   ORIGINAL: {...this._modelConfigService.getModelConfig("composer"),modelName:e.modelId}
+ *   PATCHED:  {...this._modelConfigService.getModelConfig("composer"),modelName:e.modelId,
+ *              ...(()=>{try{...inject credentials...}catch{return{}}})()}
  *
- * Spread operator inject credentials từ parent model:
- * - this._aiService.getModelDetails({specificModelField:"composer"}) → full Xf với credentials
- * - Nếu không có custom API key → apiKey = undefined → không thay đổi behavior
- * - try/catch → graceful fallback nếu getModelDetails fail
+ * V1 (Cursor < 0.50):
+ *   ORIGINAL: modelName:e.modelId,maxMode:!1}
+ *   PATCHED:  modelName:e.modelId,maxMode:!1,...(()=>{...inject credentials...})()}
  */
-const PATCHED =
-  'modelName:e.modelId,maxMode:!1,...(()=>{try{const _d=this._aiService.getModelDetails({specificModelField:"composer"});return{apiKey:_d?.apiKey,openaiApiBaseUrl:_d?.openaiApiBaseUrl,azureState:_d?.azureState,bedrockState:_d?.bedrockState}}catch(_e){return{}}})()}';
+const CREDENTIALS_INJECT =
+  '...(()=>{try{const _d=this._aiService.getModelDetails({specificModelField:"composer"});return{apiKey:_d?.apiKey,openaiApiBaseUrl:_d?.openaiApiBaseUrl,azureState:_d?.azureState,bedrockState:_d?.bedrockState}}catch(_e){return{}}})()}';
+
+let PATCHED;
+if (ORIGINAL === PATTERN_V2) {
+  // V2: append credentials sau modelName:e.modelId, trước closing }
+  PATCHED = '...this._modelConfigService.getModelConfig("composer"),modelName:e.modelId,' + CREDENTIALS_INJECT;
+} else {
+  // V1: append credentials sau maxMode:!1, trước closing }
+  PATCHED = 'modelName:e.modelId,maxMode:!1,' + CREDENTIALS_INJECT;
+}
 
 console.log("🔧 Patching _runSubagent credentials...");
 const patched = data.replace(ORIGINAL, PATCHED);
