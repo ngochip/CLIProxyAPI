@@ -34,13 +34,7 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Stream must be set to true
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	// Pass through generation parameters if provided
-	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() {
-		out, _ = sjson.SetBytes(out, "temperature", v.Value())
-	}
-	if v := gjson.GetBytes(rawJSON, "top_p"); v.Exists() {
-		out, _ = sjson.SetBytes(out, "top_p", v.Value())
-	}
+	// Codex upstream rejects temperature and top_p parameters
 
 	// Map reasoning effort
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
