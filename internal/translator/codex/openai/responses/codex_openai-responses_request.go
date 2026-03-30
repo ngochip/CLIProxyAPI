@@ -21,11 +21,18 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.SetBytes(rawJSON, "store", false)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "parallel_tool_calls", true)
 	rawJSON, _ = sjson.SetBytes(rawJSON, "include", []string{"reasoning.encrypted_content"})
+
+	// Set default reasoning if not provided
+	if !gjson.GetBytes(rawJSON, "reasoning.effort").Exists() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "reasoning.effort", "medium")
+	}
+	if !gjson.GetBytes(rawJSON, "reasoning.summary").Exists() {
+		rawJSON, _ = sjson.SetBytes(rawJSON, "reasoning.summary", "auto")
+	}
+
 	// Codex Responses rejects token limit fields, so strip them out before forwarding.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_output_tokens")
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "max_completion_tokens")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "temperature")
-	rawJSON, _ = sjson.DeleteBytes(rawJSON, "top_p")
 	if v := gjson.GetBytes(rawJSON, "service_tier"); v.Exists() {
 		if v.String() != "priority" {
 			rawJSON, _ = sjson.DeleteBytes(rawJSON, "service_tier")

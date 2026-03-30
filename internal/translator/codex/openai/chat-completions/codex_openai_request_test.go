@@ -50,50 +50,49 @@ func TestToolCallSimple(t *testing.T) {
 	out := ConvertOpenAIRequestToCodex("gpt-4o", input, true)
 	result := string(out)
 
-	items := gjson.Get(result, "input").Array()
-	if len(items) != 4 {
-		t.Fatalf("expected 4 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
+	// First system message should be extracted into instructions
+	instructions := gjson.Get(result, "instructions").String()
+	if instructions != "You are a helpful assistant." {
+		t.Errorf("expected instructions 'You are a helpful assistant.', got '%s'", instructions)
 	}
 
-	// system -> developer
-	if items[0].Get("type").String() != "message" {
-		t.Errorf("item 0: expected type 'message', got '%s'", items[0].Get("type").String())
-	}
-	if items[0].Get("role").String() != "developer" {
-		t.Errorf("item 0: expected role 'developer', got '%s'", items[0].Get("role").String())
+	items := gjson.Get(result, "input").Array()
+	// user + function_call + function_call_output = 3 (system extracted to instructions)
+	if len(items) != 3 {
+		t.Fatalf("expected 3 input items, got %d: %s", len(items), gjson.Get(result, "input").Raw)
 	}
 
 	// user
-	if items[1].Get("type").String() != "message" {
-		t.Errorf("item 1: expected type 'message', got '%s'", items[1].Get("type").String())
+	if items[0].Get("type").String() != "message" {
+		t.Errorf("item 0: expected type 'message', got '%s'", items[0].Get("type").String())
 	}
-	if items[1].Get("role").String() != "user" {
-		t.Errorf("item 1: expected role 'user', got '%s'", items[1].Get("role").String())
+	if items[0].Get("role").String() != "user" {
+		t.Errorf("item 0: expected role 'user', got '%s'", items[0].Get("role").String())
 	}
 
-	// function_call, not an empty assistant msg
-	if items[2].Get("type").String() != "function_call" {
-		t.Errorf("item 2: expected type 'function_call', got '%s'", items[2].Get("type").String())
+	// function_call
+	if items[1].Get("type").String() != "function_call" {
+		t.Errorf("item 1: expected type 'function_call', got '%s'", items[1].Get("type").String())
+	}
+	if items[1].Get("call_id").String() != "call_1" {
+		t.Errorf("item 1: expected call_id 'call_1', got '%s'", items[1].Get("call_id").String())
+	}
+	if items[1].Get("name").String() != "get_weather" {
+		t.Errorf("item 1: expected name 'get_weather', got '%s'", items[1].Get("name").String())
+	}
+	if items[1].Get("arguments").String() != `{"city":"Paris"}` {
+		t.Errorf("item 1: unexpected arguments: %s", items[1].Get("arguments").String())
+	}
+
+	// function_call_output
+	if items[2].Get("type").String() != "function_call_output" {
+		t.Errorf("item 2: expected type 'function_call_output', got '%s'", items[2].Get("type").String())
 	}
 	if items[2].Get("call_id").String() != "call_1" {
 		t.Errorf("item 2: expected call_id 'call_1', got '%s'", items[2].Get("call_id").String())
 	}
-	if items[2].Get("name").String() != "get_weather" {
-		t.Errorf("item 2: expected name 'get_weather', got '%s'", items[2].Get("name").String())
-	}
-	if items[2].Get("arguments").String() != `{"city":"Paris"}` {
-		t.Errorf("item 2: unexpected arguments: %s", items[2].Get("arguments").String())
-	}
-
-	// function_call_output
-	if items[3].Get("type").String() != "function_call_output" {
-		t.Errorf("item 3: expected type 'function_call_output', got '%s'", items[3].Get("type").String())
-	}
-	if items[3].Get("call_id").String() != "call_1" {
-		t.Errorf("item 3: expected call_id 'call_1', got '%s'", items[3].Get("call_id").String())
-	}
-	if items[3].Get("output").String() != "sunny, 22C" {
-		t.Errorf("item 3: expected output 'sunny, 22C', got '%s'", items[3].Get("output").String())
+	if items[2].Get("output").String() != "sunny, 22C" {
+		t.Errorf("item 2: expected output 'sunny, 22C', got '%s'", items[2].Get("output").String())
 	}
 }
 

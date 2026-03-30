@@ -34,24 +34,13 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 	// Stream must be set to true
 	out, _ = sjson.SetBytes(out, "stream", stream)
 
-	// Codex not support temperature, top_p, top_k, max_output_tokens, so comment them
-	// if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "temperature", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "top_p"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "top_p", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "top_k"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "top_k", v.Value())
-	// }
-
-	// Map token limits
-	// if v := gjson.GetBytes(rawJSON, "max_tokens"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
-	// }
-	// if v := gjson.GetBytes(rawJSON, "max_completion_tokens"); v.Exists() {
-	// 	out, _ = sjson.SetBytes(out, "max_output_tokens", v.Value())
-	// }
+	// Pass through generation parameters if provided
+	if v := gjson.GetBytes(rawJSON, "temperature"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "temperature", v.Value())
+	}
+	if v := gjson.GetBytes(rawJSON, "top_p"); v.Exists() {
+		out, _ = sjson.SetBytes(out, "top_p", v.Value())
+	}
 
 	// Map reasoning effort
 	if v := gjson.GetBytes(rawJSON, "reasoning_effort"); v.Exists() {
@@ -91,29 +80,47 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 		}
 	}
 
-	// Extract system instructions from first system message (string or text object)
+	// Extract the first system message into the top-level instructions field,
+	// which has higher priority than developer messages in the input array.
+	// Remaining system messages are kept in input as developer role.
 	messages := gjson.GetBytes(rawJSON, "messages")
-	// if messages.IsArray() {
-	// 	arr := messages.Array()
-	// 	for i := 0; i < len(arr); i++ {
-	// 		m := arr[i]
-	// 		if m.Get("role").String() == "system" {
-	// 			c := m.Get("content")
-	// 			if c.Type == gjson.String {
-	// 				out, _ = sjson.SetBytes(out, "instructions", c.String())
-	// 			} else if c.IsObject() && c.Get("type").String() == "text" {
-	// 				out, _ = sjson.SetBytes(out, "instructions", c.Get("text").String())
-	// 			}
-	// 			break
-	// 		}
-	// 	}
-	// }
+	firstSystemIdx := -1
+	if messages.IsArray() {
+		arr := messages.Array()
+		for i := 0; i < len(arr); i++ {
+			if arr[i].Get("role").String() == "system" {
+				c := arr[i].Get("content")
+				if c.Type == gjson.String {
+					out, _ = sjson.SetBytes(out, "instructions", c.String())
+				} else if c.IsArray() {
+					// Concatenate all text parts
+					var parts []string
+					for _, item := range c.Array() {
+						if item.Get("type").String() == "text" {
+							parts = append(parts, item.Get("text").String())
+						}
+					}
+					if len(parts) > 0 {
+						out, _ = sjson.SetBytes(out, "instructions", strings.Join(parts, "\n"))
+					}
+				} else if c.IsObject() && c.Get("type").String() == "text" {
+					out, _ = sjson.SetBytes(out, "instructions", c.Get("text").String())
+				}
+				firstSystemIdx = i
+				break
+			}
+		}
+	}
 
-	// Build input from messages, handling all message types including tool calls
+	// Build input from messages, handling all message types including tool calls.
+	// The first system message is already extracted into instructions, so skip it.
 	out, _ = sjson.SetRawBytes(out, "input", []byte(`[]`))
 	if messages.IsArray() {
 		arr := messages.Array()
 		for i := 0; i < len(arr); i++ {
+			if i == firstSystemIdx {
+				continue
+			}
 			m := arr[i]
 			role := m.Get("role").String()
 
