@@ -8,6 +8,8 @@ package chat_completions
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -52,6 +54,13 @@ type ToolCallAccumulator struct {
 type ThinkingAccumulator struct {
 	Thinking  strings.Builder
 	Signature strings.Builder
+	Nonce     string
+}
+
+func generateThinkingNonce() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func calculateClaudeUsageTokens(usage gjson.Result) (promptTokens, completionTokens, totalTokens, cachedTokens int64) {
@@ -174,19 +183,18 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 				// Don't output anything yet - wait for complete tool call
 				return [][]byte{}
-			} else if blockType == "thinking" {
-				// Start of thinking block - initialize accumulator to track thinking and signature
-				index := int(root.Get("index").Int())
+		} else if blockType == "thinking" {
+			index := int(root.Get("index").Int())
 
-				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator == nil {
-					(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator = make(map[int]*ThinkingAccumulator)
-				}
+			if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator == nil {
+				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator = make(map[int]*ThinkingAccumulator)
+			}
 
-				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index] = &ThinkingAccumulator{}
+			nonce := generateThinkingNonce()
+			(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index] = &ThinkingAccumulator{Nonce: nonce}
 
-				// Stream opening <think> tag
-				template, _ = sjson.SetBytes(template, "choices.0.delta.content", "<think>\n")
-				return [][]byte{template}
+			template, _ = sjson.SetBytes(template, "choices.0.delta.content", "<!--thinking-start:"+nonce+"-->\n")
+			return [][]byte{template}
 			}
 		}
 		return [][]byte{}
@@ -218,26 +226,21 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			}
 		}
 
-		// Check for thinking accumulator
 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator != nil {
 			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index]; exists {
-				// Lấy thinking text và signature đã accumulate
 				thinkingText := accumulator.Thinking.String()
 				signatureText := accumulator.Signature.String()
+				nonce := accumulator.Nonce
 
-				// Generate thinkingID từ hash của thinking text
 				thinkingID := cache.GenerateThinkingID(thinkingText)
 
-				// Cache thinking với signature
 				if thinkingText != "" {
 					cache.CacheThinking(thinkingID, thinkingText, signatureText)
 				}
 
-				// Stream closing </think> tag + hidden thinkId marker (HTML comment ẩn trên Cursor UI)
-				closingContent := "\n</think>\n<!--thinkId:" + thinkingID + "-->\n"
+				closingContent := "\n<!--thinking-end:" + nonce + "-->\n<!--thinkId:" + thinkingID + "-->\n"
 				template, _ = sjson.SetBytes(template, "choices.0.delta.content", closingContent)
 
-				// Clean up the accumulator for this index
 				delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator, index)
 
 				return [][]byte{template}

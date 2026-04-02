@@ -40,22 +40,26 @@ Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 
 ### 1. Thinking Block Patch (`patch-cursor-thinking.js`)
 
-**Vấn đề:** Custom models gửi thinking content qua `<think>` tags trong `delta.content`, nhưng Cursor không render thành native thinking UI. `reasoning_content` field cũng không được Cursor support (0 occurrences trong client code).
+**Vấn đề:** Custom models gửi thinking content qua `delta.content`, nhưng Cursor không render thành native thinking UI. `reasoning_content` field cũng không được Cursor support (0 occurrences trong client code).
 
-**Giải pháp:** Patch `handleTextDelta` để detect `<think>` tags → redirect sang `handleThinkingDelta` → trigger native collapsible thinking blocks.
+**Giải pháp:** Patch `handleTextDelta` để detect thinking delimiters → redirect sang `handleThinkingDelta` → trigger native collapsible thinking blocks.
 
-**v2 fixes (2026-02-22):** Thinking block thứ 2/3 đôi khi chỉ hiển thị "Thinking" animation mà không hiển thị text content. Root causes và fixes:
-- **Fix A - Tag boundary buffering:** `<think>` hoặc `</think>` có thể bị split across SSE deltas khi Cursor server re-chunk protobuf. Patch v2 buffer partial tags và ghép lại ở delta tiếp theo.
-- **Fix B - Recursive _after handling:** Text sau `</think>` giờ route qua `handleTextDelta` (thay vì `_origHandleTextDelta`) để detect nested `<think>` tags trong cùng delta.
+**v6 fixes (2026-04-02) - Nonce-based delimiters:**
+Thinking content có thể chứa `</think>` literal (code blocks, XML discussion, etc.) → patch v5 detect premature closing tag → thinking bị cắt, phần còn lại tràn ra như text → "thought briefly".
 
-**v3 fixes (2026-02-26):** Thinking trong Exploring groups không hiển thị content, thẻ Exploring bị mất:
-- **Fix C - Synchronous completion:** Bỏ `queueMicrotask`, gọi `handleThinkingCompleted` đồng bộ. Root cause: khi Cursor server batch nhiều protobuf events (text-delta + tool-call-started), microtask chạy SAU tool-call-started → `getLastBubble()` trả về tool call bubble thay vì thinking → bail out → `thinkingDurationMs` không set → UI không expandable. `S_()` (SolidJS batch) là synchronous nên không cần defer.
+Fix: Proxy gửi nonce-based delimiters thay vì `<think>/<\/think>`:
+- Opening: `<!--thinking-start:XXXXXXXX-->` (XXXXXXXX = 8 hex chars random per block)
+- Closing: `<!--thinking-end:XXXXXXXX-->` (same nonce)
+- Patch chỉ match closing tag có ĐÚNG nonce → không bao giờ false-positive.
+- Backward compatible: vẫn detect legacy `<think>/<\/think>`.
 
-**Yêu cầu phía proxy:** Stream thinking qua `<think>...</think>` tags trong `delta.content`:
+**v3 fixes (2026-02-26):** Synchronous `handleThinkingCompleted` (bỏ `queueMicrotask`).
+
+**Yêu cầu phía proxy (v6+):** Stream thinking qua nonce-based delimiters trong `delta.content`:
 ```
-data: {"choices":[{"delta":{"content":"<think>\n"}}]}
-data: {"choices":[{"delta":{"content":"thinking text..."}}]}
-data: {"choices":[{"delta":{"content":"\n</think>\n"}}]}
+data: {"choices":[{"delta":{"content":"<!--thinking-start:a1b2c3d4-->\n"}}]}
+data: {"choices":[{"delta":{"content":"thinking text (may contain </think>, code blocks, etc.)..."}}]}
+data: {"choices":[{"delta":{"content":"\n<!--thinking-end:a1b2c3d4-->\n"}}]}
 data: {"choices":[{"delta":{"content":"actual response..."}}]}
 ```
 
