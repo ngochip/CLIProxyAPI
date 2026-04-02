@@ -295,8 +295,8 @@ func parseSuffixToConfig(rawSuffix, provider, model string) ThinkingConfig {
 // Ví dụ: "(auto+max)" → same result
 // Ví dụ: "(high+auto)" → Effort="high" + Mode=ModeAuto
 func parseCompoundSuffix(rawSuffix, provider, model string) ThinkingConfig {
-	parts := strings.SplitN(rawSuffix, "+", 2)
-	if len(parts) != 2 {
+	parts := strings.Split(rawSuffix, "+")
+	if len(parts) < 2 {
 		return ThinkingConfig{}
 	}
 
