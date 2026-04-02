@@ -305,13 +305,13 @@ func ConvertCodexResponseToOpenAINonStream(_ context.Context, _ string, original
 	}
 
 	// Process the output array for content and function calls
+	var toolCalls [][]byte
 	outputResult := responseResult.Get("output")
 	hasToolCalls := false
 	if outputResult.IsArray() {
 		outputArray := outputResult.Array()
 		var contentText string
 		var reasoningText string
-		var toolCalls [][]byte
 
 		for _, outputItem := range outputArray {
 			outputType := outputItem.Get("type").String()

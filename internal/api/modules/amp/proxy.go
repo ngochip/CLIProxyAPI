@@ -218,6 +218,21 @@ func isStreamingResponse(resp *http.Response) bool {
 	return false
 }
 
+// filterBetaFeatures removes a specific feature from a comma-separated Anthropic-Beta header value.
+func filterBetaFeatures(header, featureToRemove string) string {
+	features := strings.Split(header, ",")
+	filtered := make([]string, 0, len(features))
+
+	for _, feature := range features {
+		trimmed := strings.TrimSpace(feature)
+		if trimmed != "" && trimmed != featureToRemove {
+			filtered = append(filtered, trimmed)
+		}
+	}
+
+	return strings.Join(filtered, ",")
+}
+
 // proxyHandler converts httputil.ReverseProxy to gin.HandlerFunc
 func proxyHandler(proxy *httputil.ReverseProxy) gin.HandlerFunc {
 	return func(c *gin.Context) {
