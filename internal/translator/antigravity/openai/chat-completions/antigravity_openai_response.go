@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 
@@ -28,6 +29,10 @@ type convertCliResponseToOpenAIChatParams struct {
 	SawToolCall          bool   // Tracks if any tool call was seen in the entire stream
 	UpstreamFinishReason string // Caches the upstream finish reason for final chunk
 	SanitizedNameMap     map[string]string
+	// Cursor thinking support: accumulate thinking text + signature across streaming chunks
+	InThinking       bool
+	ThinkingText     strings.Builder
+	ThoughtSignature string
 }
 
 // functionCallIDCounter provides a process-wide unique counter for function call identifiers.
@@ -137,19 +142,52 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 			hasThoughtSignature := thoughtSignatureResult.Exists() && thoughtSignatureResult.String() != ""
 			hasContentPayload := partTextResult.Exists() || functionCallResult.Exists() || inlineDataResult.Exists()
 
-			// Ignore encrypted thoughtSignature but keep any actual content in the same part.
+			// Cache thoughtSignature cho thinking accumulator
 			if hasThoughtSignature && !hasContentPayload {
+				sig := thoughtSignatureResult.String()
+				if sig != "" && sig != geminiCLIFunctionThoughtSignature {
+					(*param).(*convertCliResponseToOpenAIChatParams).ThoughtSignature = sig
+				}
 				continue
 			}
 
 			if partTextResult.Exists() {
 				textContent := partTextResult.String()
+				p := (*param).(*convertCliResponseToOpenAIChatParams)
 
-				// Handle text content, distinguishing between regular content and reasoning/thoughts.
 				if partResult.Get("thought").Bool() {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
+					// Cursor thinking: stream thinking qua content field với <think> tags
+					var thinkContent string
+					if !p.InThinking {
+						p.InThinking = true
+						thinkContent = "<think>\n" + textContent
+					} else {
+						thinkContent = textContent
+					}
+					p.ThinkingText.WriteString(textContent)
+					// Cache thoughtSignature nếu có trong part này
+					sig := partResult.Get("thoughtSignature").String()
+					if sig == "" {
+						sig = partResult.Get("thought_signature").String()
+					}
+					if sig != "" && sig != geminiCLIFunctionThoughtSignature {
+						p.ThoughtSignature = sig
+					}
+					template, _ = sjson.SetBytes(template, "choices.0.delta.content", thinkContent)
 				} else {
-					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
+					// Transition từ thinking sang normal text: close <think> tag + thinkId
+					if p.InThinking {
+						p.InThinking = false
+						thinkingText := p.ThinkingText.String()
+						thinkingID := cache.GenerateThinkingID(thinkingText)
+						if thinkingText != "" {
+							cache.CacheThinking(thinkingID, thinkingText, p.ThoughtSignature)
+						}
+						closingTag := "\n</think>\n<!--thinkId:" + thinkingID + "-->\n" + textContent
+						template, _ = sjson.SetBytes(template, "choices.0.delta.content", closingTag)
+					} else {
+						template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
+					}
 				}
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
 			} else if functionCallResult.Exists() {
@@ -166,7 +204,13 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 
 				functionCallTemplate := []byte(`{"id": "","index": 0,"type": "function","function": {"name": "","arguments": ""}}`)
 				fcName := util.RestoreSanitizedToolName((*param).(*convertCliResponseToOpenAIChatParams).SanitizedNameMap, functionCallResult.Get("name").String())
-				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
+				// Ưu tiên dùng id từ upstream Antigravity nếu có, nếu không thì generate mới
+				upstreamID := functionCallResult.Get("id").String()
+				if upstreamID != "" {
+					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", upstreamID)
+				} else {
+					functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "id", fmt.Sprintf("%s-%d-%d", fcName, time.Now().UnixNano(), atomic.AddUint64(&functionCallIDCounter, 1)))
+				}
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "index", functionCallIndex)
 				functionCallTemplate, _ = sjson.SetBytes(functionCallTemplate, "function.name", fcName)
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
@@ -201,8 +245,35 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 		}
 	}
 
-	// Determine finish_reason only on the final chunk (has both finishReason and usage metadata)
+	// Close thinking nếu vẫn đang mở (thinking -> finish hoặc thinking -> tool_call)
 	params := (*param).(*convertCliResponseToOpenAIChatParams)
+	if params.InThinking {
+		hasFunctionCallInChunk := false
+		if partsResult.IsArray() {
+			for _, pr := range partsResult.Array() {
+				if pr.Get("functionCall").Exists() {
+					hasFunctionCallInChunk = true
+					break
+				}
+			}
+		}
+		finishReasonExists := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason").Exists()
+		if hasFunctionCallInChunk || finishReasonExists {
+			params.InThinking = false
+			thinkingText := params.ThinkingText.String()
+			thinkingID := cache.GenerateThinkingID(thinkingText)
+			if thinkingText != "" {
+				cache.CacheThinking(thinkingID, thinkingText, params.ThoughtSignature)
+			}
+			closingTag := "\n</think>\n<!--thinkId:" + thinkingID + "-->\n"
+			// Prepend closing tag vào content hiện tại nếu có
+			existingContent := gjson.GetBytes(template, "choices.0.delta.content").String()
+			template, _ = sjson.SetBytes(template, "choices.0.delta.content", closingTag+existingContent)
+			template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
+		}
+	}
+
+	// Determine finish_reason only on the final chunk (has both finishReason and usage metadata)
 	upstreamFinishReason := params.UpstreamFinishReason
 	sawToolCall := params.SawToolCall
 

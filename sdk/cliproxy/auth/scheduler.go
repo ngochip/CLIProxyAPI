@@ -18,6 +18,7 @@ const (
 	schedulerStrategyCustom schedulerStrategy = iota
 	schedulerStrategyRoundRobin
 	schedulerStrategyFillFirst
+	schedulerStrategyWeighted
 )
 
 // scheduledState describes how an auth currently participates in a model shard.
@@ -63,6 +64,8 @@ type modelScheduler struct {
 	priorityOrder   []int
 	readyByPriority map[int]*readyBucket
 	blocked         cooldownQueue
+	// weightedAll is a cross-priority weighted ready view used by schedulerStrategyWeighted.
+	weightedAll *readyBucket
 }
 
 // scheduledAuth stores the runtime scheduling state for a single auth inside a model shard.
@@ -86,6 +89,15 @@ type readyView struct {
 	parentOrder  []string
 	parentCursor int
 	children     map[string]*childBucket
+	// weighted holds smooth weighted round-robin state (used only when strategy is weighted).
+	weighted []scheduledWeightedEntry
+}
+
+// scheduledWeightedEntry tracks per-entry current weight for NGINX-style SWRR.
+type scheduledWeightedEntry struct {
+	entry           *scheduledAuth
+	effectiveWeight int
+	currentWeight   int
 }
 
 // childBucket keeps the per-parent rotation state for grouped Gemini virtual auths.
@@ -112,6 +124,8 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	switch selector.(type) {
 	case *FillFirstSelector:
 		return schedulerStrategyFillFirst
+	case *WeightedRoundRobinSelector:
+		return schedulerStrategyWeighted
 	case nil, *RoundRobinSelector:
 		return schedulerStrategyRoundRobin
 	default:
@@ -265,13 +279,19 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
-		if !okPriority {
-			continue
-		}
-		if !hasCandidate || priorityReady > bestPriority {
-			bestPriority = priorityReady
-			hasCandidate = true
+		if s.strategy == schedulerStrategyWeighted {
+			if shard.weightedAll != nil && len(shard.weightedAll.all.weighted) > 0 {
+				hasCandidate = true
+			}
+		} else {
+			priorityReady, okPriority := shard.highestReadyPriorityLocked(false, predicate)
+			if !okPriority {
+				continue
+			}
+			if !hasCandidate || priorityReady > bestPriority {
+				bestPriority = priorityReady
+				hasCandidate = true
+			}
 		}
 	}
 	if !hasCandidate {
@@ -304,7 +324,12 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		if shard == nil {
 			continue
 		}
-		picked := shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		var picked *Auth
+		if s.strategy == schedulerStrategyWeighted {
+			picked = shard.pickWeightedLocked(false, predicate)
+		} else {
+			picked = shard.pickReadyAtPriorityLocked(false, bestPriority, schedulerStrategyRoundRobin, predicate)
+		}
 		if picked == nil {
 			continue
 		}
@@ -649,11 +674,31 @@ func (m *modelScheduler) pickReadyLocked(preferWebsocket bool, strategy schedule
 		return nil
 	}
 	m.promoteExpiredLocked(time.Now())
+	if strategy == schedulerStrategyWeighted {
+		return m.pickWeightedLocked(preferWebsocket, predicate)
+	}
 	priorityReady, okPriority := m.highestReadyPriorityLocked(preferWebsocket, predicate)
 	if !okPriority {
 		return nil
 	}
 	return m.pickReadyAtPriorityLocked(preferWebsocket, priorityReady, strategy, predicate)
+}
+
+// pickWeightedLocked selects the next auth using smooth weighted round-robin
+// across all priority tiers.
+func (m *modelScheduler) pickWeightedLocked(preferWebsocket bool, predicate func(*scheduledAuth) bool) *Auth {
+	if m == nil || m.weightedAll == nil {
+		return nil
+	}
+	view := &m.weightedAll.all
+	if preferWebsocket && len(m.weightedAll.ws.weighted) > 0 {
+		view = &m.weightedAll.ws
+	}
+	picked := view.pickWeightedRoundRobin(predicate)
+	if picked == nil || picked.auth == nil {
+		return nil
+	}
+	return picked.auth
 }
 
 // highestReadyPriorityLocked returns the highest priority bucket that still has a matching ready auth.
@@ -758,6 +803,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 	m.priorityOrder = m.priorityOrder[:0]
 	m.blocked = m.blocked[:0]
 	priorityBuckets := make(map[int][]*scheduledAuth)
+	var allReady []*scheduledAuth
 	for _, entry := range m.entries {
 		if entry == nil || entry.auth == nil {
 			continue
@@ -766,6 +812,7 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		case scheduledStateReady:
 			priority := entry.meta.priority
 			priorityBuckets[priority] = append(priorityBuckets[priority], entry)
+			allReady = append(allReady, entry)
 		case scheduledStateCooldown, scheduledStateBlocked:
 			m.blocked = append(m.blocked, entry)
 		}
@@ -797,6 +844,70 @@ func (m *modelScheduler) rebuildIndexesLocked() {
 		}
 		return left.nextRetryAt.Before(right.nextRetryAt)
 	})
+
+	// Build cross-priority weighted view.
+	if len(allReady) > 0 {
+		sort.Slice(allReady, func(i, j int) bool {
+			return allReady[i].auth.ID < allReady[j].auth.ID
+		})
+		m.weightedAll = buildWeightedReadyBucket(allReady, m.weightedAll)
+	} else {
+		m.weightedAll = nil
+	}
+}
+
+// buildWeightedReadyBucket builds a cross-priority weighted ready bucket.
+// It preserves currentWeight from the previous bucket for surviving entries.
+func buildWeightedReadyBucket(entries []*scheduledAuth, previous *readyBucket) *readyBucket {
+	bucket := &readyBucket{}
+	bucket.all = buildWeightedReadyView(entries, previousWeightedView(previous, false))
+	wsEntries := make([]*scheduledAuth, 0, len(entries))
+	for _, entry := range entries {
+		if entry != nil && entry.meta != nil && entry.meta.websocketEnabled {
+			wsEntries = append(wsEntries, entry)
+		}
+	}
+	bucket.ws = buildWeightedReadyView(wsEntries, previousWeightedView(previous, true))
+	return bucket
+}
+
+func previousWeightedView(previous *readyBucket, ws bool) []scheduledWeightedEntry {
+	if previous == nil {
+		return nil
+	}
+	if ws {
+		return previous.ws.weighted
+	}
+	return previous.all.weighted
+}
+
+func buildWeightedReadyView(entries []*scheduledAuth, previous []scheduledWeightedEntry) readyView {
+	view := readyView{flat: append([]*scheduledAuth(nil), entries...)}
+	if len(entries) == 0 {
+		return view
+	}
+	oldWeights := make(map[string]int, len(previous))
+	for _, pw := range previous {
+		if pw.entry != nil && pw.entry.auth != nil {
+			oldWeights[pw.entry.auth.ID] = pw.currentWeight
+		}
+	}
+	view.weighted = make([]scheduledWeightedEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry == nil || entry.meta == nil {
+			continue
+		}
+		w := entry.meta.priority
+		if w <= 0 {
+			w = 1
+		}
+		view.weighted = append(view.weighted, scheduledWeightedEntry{
+			entry:           entry,
+			effectiveWeight: w,
+			currentWeight:   oldWeights[entry.auth.ID],
+		})
+	}
+	return view
 }
 
 // buildReadyBucket prepares the general and websocket-only ready views for one priority bucket.
@@ -873,6 +984,35 @@ func (v *readyView) pickRoundRobin(predicate func(*scheduledAuth) bool) *schedul
 		return entry
 	}
 	return nil
+}
+
+// pickWeightedRoundRobin selects the next entry using smooth weighted round-robin.
+// Each tick adds effectiveWeight to currentWeight; the entry with the highest
+// currentWeight wins and gets totalWeight subtracted. Entries that fail the
+// predicate are skipped and their weight is not advanced.
+func (v *readyView) pickWeightedRoundRobin(predicate func(*scheduledAuth) bool) *scheduledAuth {
+	if len(v.weighted) == 0 {
+		return nil
+	}
+
+	totalWeight := 0
+	bestIdx := -1
+	for i := range v.weighted {
+		if predicate != nil && !predicate(v.weighted[i].entry) {
+			continue
+		}
+		v.weighted[i].currentWeight += v.weighted[i].effectiveWeight
+		totalWeight += v.weighted[i].effectiveWeight
+		if bestIdx < 0 || v.weighted[i].currentWeight > v.weighted[bestIdx].currentWeight {
+			bestIdx = i
+		}
+	}
+
+	if bestIdx < 0 {
+		return nil
+	}
+	v.weighted[bestIdx].currentWeight -= totalWeight
+	return v.weighted[bestIdx].entry
 }
 
 // pickGroupedRoundRobin rotates across parents first and then within the selected parent.

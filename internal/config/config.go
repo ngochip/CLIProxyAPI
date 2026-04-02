@@ -205,7 +205,13 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "weighted".
+	//
+	// "weighted" distributes requests proportionally using each credential's
+	// priority attribute as weight. For example, priority 5 and priority 3
+	// yield a 5:3 (≈62%:38%) distribution. Priority 0 or unset is treated
+	// as weight 1. Uses smooth weighted round-robin (NGINX-style) to spread
+	// requests evenly across cycles.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 }
 

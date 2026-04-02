@@ -631,6 +631,8 @@ func (s *Service) Run(ctx context.Context) error {
 			switch strategy {
 			case "fill-first", "fillfirst", "ff":
 				return "fill-first"
+			case "weighted", "weighted-round-robin", "wrr":
+				return "weighted"
 			default:
 				return "round-robin"
 			}
@@ -642,6 +644,8 @@ func (s *Service) Run(ctx context.Context) error {
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
+			case "weighted":
+				selector = &coreauth.WeightedRoundRobinSelector{}
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}

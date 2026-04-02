@@ -494,6 +494,240 @@ func TestRoundRobinSelectorPick_SingleParentFallsBackToFlat(t *testing.T) {
 	}
 }
 
+func TestWeightedRoundRobinSelectorPick_ProportionalDistribution(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{"priority": "5"}},
+		{ID: "b", Attributes: map[string]string{"priority": "3"}},
+	}
+
+	// 5+3=8, so over 80 picks: A should get ~50, B should get ~30.
+	counts := map[string]int{}
+	total := 80
+	for i := 0; i < total; i++ {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		counts[got.ID]++
+	}
+
+	wantA := total * 5 / 8
+	wantB := total * 3 / 8
+	if counts["a"] != wantA {
+		t.Fatalf("auth A picked %d times, want %d (total=%d)", counts["a"], wantA, total)
+	}
+	if counts["b"] != wantB {
+		t.Fatalf("auth B picked %d times, want %d (total=%d)", counts["b"], wantB, total)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_SmoothDistribution(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{"priority": "5"}},
+		{ID: "b", Attributes: map[string]string{"priority": "3"}},
+	}
+
+	// Smooth weighted round-robin should not burst all of A's slots together.
+	// Over 8 picks (one full cycle), verify A and B interleave.
+	picks := make([]string, 8)
+	for i := 0; i < 8; i++ {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		picks[i] = got.ID
+	}
+
+	// No more than 2 consecutive picks of the same auth (smooth interleaving).
+	maxConsecutive := 1
+	for i := 1; i < len(picks); i++ {
+		if picks[i] == picks[i-1] {
+			maxConsecutive++
+			if maxConsecutive > 2 {
+				t.Fatalf("more than 2 consecutive picks of %q at position %d: %v", picks[i], i, picks)
+			}
+		} else {
+			maxConsecutive = 1
+		}
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_ZeroPriorityTreatedAsOne(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{"priority": "3"}},
+		{ID: "b"}, // no priority → weight 1
+	}
+
+	// 3+1=4, over 40 picks: A should get 30, B should get 10.
+	counts := map[string]int{}
+	total := 40
+	for i := 0; i < total; i++ {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+
+	wantA := total * 3 / 4
+	wantB := total * 1 / 4
+	if counts["a"] != wantA {
+		t.Fatalf("auth A picked %d times, want %d", counts["a"], wantA)
+	}
+	if counts["b"] != wantB {
+		t.Fatalf("auth B picked %d times, want %d", counts["b"], wantB)
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_CooldownFallback(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	now := time.Now()
+	model := "test-model"
+
+	highPri := &Auth{
+		ID:         "high",
+		Attributes: map[string]string{"priority": "10"},
+		ModelStates: map[string]*ModelState{
+			model: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota:          QuotaState{Exceeded: true},
+			},
+		},
+	}
+	lowPri := &Auth{ID: "low", Attributes: map[string]string{"priority": "1"}}
+
+	got, err := selector.Pick(context.Background(), "gemini", model, cliproxyexecutor.Options{}, []*Auth{highPri, lowPri})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "low" {
+		t.Fatalf("Pick() auth.ID = %q, want %q (high should be blocked)", got.ID, "low")
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_EqualWeights(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{"priority": "5"}},
+		{ID: "b", Attributes: map[string]string{"priority": "5"}},
+	}
+
+	counts := map[string]int{}
+	total := 20
+	for i := 0; i < total; i++ {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+
+	if counts["a"] != 10 || counts["b"] != 10 {
+		t.Fatalf("expected 50/50 split, got a=%d b=%d", counts["a"], counts["b"])
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_ThreeAuths(t *testing.T) {
+	t.Parallel()
+
+	selector := &WeightedRoundRobinSelector{}
+	// A=5, B=3, C=2 → total=10
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{"priority": "5"}},
+		{ID: "b", Attributes: map[string]string{"priority": "3"}},
+		{ID: "c", Attributes: map[string]string{"priority": "2"}},
+	}
+
+	counts := map[string]int{}
+	total := 100
+	for i := 0; i < total; i++ {
+		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		counts[got.ID]++
+	}
+
+	if counts["a"] != 50 {
+		t.Fatalf("auth A picked %d times, want 50", counts["a"])
+	}
+	if counts["b"] != 30 {
+		t.Fatalf("auth B picked %d times, want 30", counts["b"])
+	}
+	if counts["c"] != 20 {
+		t.Fatalf("auth C picked %d times, want 20", counts["c"])
+	}
+}
+
+func TestWeightedRoundRobinSelectorPick_Concurrent(t *testing.T) {
+	selector := &WeightedRoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "a", Attributes: map[string]string{"priority": "5"}},
+		{ID: "b", Attributes: map[string]string{"priority": "3"}},
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+
+	goroutines := 32
+	iterations := 100
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < iterations; j++ {
+				got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
+				if err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+				if got == nil {
+					select {
+					case errCh <- errors.New("Pick() returned nil auth"):
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("concurrent Pick() error = %v", err)
+	default:
+	}
+}
+
 func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *testing.T) {
 	t.Parallel()
 

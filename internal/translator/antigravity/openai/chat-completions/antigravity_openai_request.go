@@ -4,8 +4,10 @@ package chat_completions
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
@@ -15,6 +17,45 @@ import (
 )
 
 const geminiCLIFunctionThoughtSignature = "skip_thought_signature_validator"
+
+var (
+	agThinkTagRegex = regexp.MustCompile(`<think>([\s\S]*?)</think>`)
+	agThinkIdRegex  = regexp.MustCompile(`<!--thinkId:([a-f0-9]+)-->`)
+)
+
+// extractThinkingPartsForAntigravity parse content chứa <think> tags + <!--thinkId:xxx--> markers
+// và trả về thinking parts (thought:true) + text parts cho Antigravity format.
+// Returns: thoughtText, thoughtSignature, remainingText
+func extractThinkingPartsForAntigravity(text string) (string, string, string) {
+	idMatch := agThinkIdRegex.FindStringSubmatch(text)
+	if len(idMatch) <= 1 {
+		return "", "", text
+	}
+
+	thinkingID := idMatch[1]
+	entry := cache.GetCachedThinking(thinkingID)
+
+	var thinkingText, signature string
+
+	if entry != nil && entry.Signature != "" {
+		thinkingText = entry.ThinkingText
+		signature = entry.Signature
+	} else {
+		// Fallback: extract thinking từ <think> tag
+		thinkMatch := agThinkTagRegex.FindStringSubmatch(text)
+		if len(thinkMatch) > 1 {
+			thinkingText = strings.TrimSpace(thinkMatch[1])
+			thinkingText = strings.ReplaceAll(thinkingText, "\\`\\`\\`", "```")
+		}
+		signature = geminiCLIFunctionThoughtSignature
+	}
+
+	remainingText := agThinkTagRegex.ReplaceAllString(text, "")
+	remainingText = agThinkIdRegex.ReplaceAllString(remainingText, "")
+	remainingText = strings.TrimSpace(remainingText)
+
+	return thinkingText, signature, remainingText
+}
 
 // ConvertOpenAIRequestToAntigravity converts an OpenAI Chat Completions request (raw JSON)
 // into a complete Gemini CLI request JSON. All JSON construction uses sjson and lookups use gjson.
@@ -159,16 +200,25 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
 					out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), content.Get("text").String())
 					systemPartIndex++
-				} else if content.IsArray() {
-					contents := content.Array()
-					if len(contents) > 0 {
-						out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
-						for j := 0; j < len(contents); j++ {
-							out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), contents[j].Get("text").String())
+			} else if content.IsArray() {
+				contents := content.Array()
+				if len(contents) > 0 {
+					out, _ = sjson.SetBytes(out, "request.systemInstruction.role", "user")
+					for j := 0; j < len(contents); j++ {
+						item := contents[j]
+						var textVal string
+						if item.Type == gjson.String {
+							textVal = item.String()
+						} else if item.Get("text").Exists() {
+							textVal = item.Get("text").String()
+						}
+						if textVal != "" {
+							out, _ = sjson.SetBytes(out, fmt.Sprintf("request.systemInstruction.parts.%d.text", systemPartIndex), textVal)
 							systemPartIndex++
 						}
 					}
 				}
+			}
 			} else if role == "user" || ((role == "system" || role == "developer") && len(arr) == 1) {
 				// Build single user content node to avoid splitting into multiple contents
 				node := []byte(`{"role":"user","parts":[]}`)
@@ -247,16 +297,38 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				node := []byte(`{"role":"model","parts":[]}`)
 				p := 0
 				if content.Type == gjson.String && content.String() != "" {
-					node, _ = sjson.SetBytes(node, "parts.-1.text", content.String())
-					p++
+					// Parse thinking từ <think> tags + thinkId markers
+					thinkText, thinkSig, remaining := extractThinkingPartsForAntigravity(content.String())
+					if thinkText != "" {
+						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", thinkText)
+						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thought", true)
+						if thinkSig != "" {
+							node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", thinkSig)
+						}
+						p++
+					}
+					if remaining != "" {
+						node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", remaining)
+						p++
+					}
 				} else if content.IsArray() {
-					// Assistant multimodal content (e.g. text + image) -> single model content with parts
 					for _, item := range content.Array() {
 						switch item.Get("type").String() {
 						case "text":
 							text := item.Get("text").String()
 							if text != "" {
-								node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", text)
+								thinkText, thinkSig, remaining := extractThinkingPartsForAntigravity(text)
+								if thinkText != "" {
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", thinkText)
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thought", true)
+									if thinkSig != "" {
+										node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".thoughtSignature", thinkSig)
+									}
+									p++
+								}
+								if remaining != "" {
+									node, _ = sjson.SetBytes(node, "parts."+itoa(p)+".text", remaining)
+								}
 							}
 							p++
 						case "image_url":
@@ -395,11 +467,42 @@ func ConvertOpenAIRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 						log.Warnf("Failed to append tool declaration for '%s': %v", fn.Get("name").String(), errSet)
 						continue
 					}
-					functionToolNode = tmp
-					hasFunction = true
-				}
+			functionToolNode = tmp
+				hasFunction = true
 			}
-			if gs := t.Get("google_search"); gs.Exists() {
+		} else if !t.Get("type").Exists() && t.Get("name").Exists() {
+			// Cursor-compatible: tools gửi trực tiếp không có type/function wrapper
+			// Format: {name, description, input_schema} thay vì {type: "function", function: {name, description, parameters}}
+			fnName := util.SanitizeFunctionName(t.Get("name").String())
+			fnDesc := t.Get("description").String()
+
+			fnNode := []byte(`{}`)
+			fnNode, _ = sjson.SetBytes(fnNode, "name", fnName)
+			if fnDesc != "" {
+				fnNode, _ = sjson.SetBytes(fnNode, "description", fnDesc)
+			}
+
+			if schema := t.Get("input_schema"); schema.Exists() && schema.IsObject() {
+				fnNode, _ = sjson.SetRawBytes(fnNode, "parametersJsonSchema", []byte(schema.Raw))
+			} else if schema := t.Get("parameters"); schema.Exists() && schema.IsObject() {
+				fnNode, _ = sjson.SetRawBytes(fnNode, "parametersJsonSchema", []byte(schema.Raw))
+			} else {
+				fnNode, _ = sjson.SetBytes(fnNode, "parametersJsonSchema.type", "object")
+				fnNode, _ = sjson.SetRawBytes(fnNode, "parametersJsonSchema.properties", []byte(`{}`))
+			}
+
+			if !hasFunction {
+				functionToolNode, _ = sjson.SetRawBytes(functionToolNode, "functionDeclarations", []byte("[]"))
+			}
+			tmp, errSet := sjson.SetRawBytes(functionToolNode, "functionDeclarations.-1", fnNode)
+			if errSet != nil {
+				log.Warnf("Failed to append cursor tool declaration for '%s': %v", fnName, errSet)
+				continue
+			}
+			functionToolNode = tmp
+			hasFunction = true
+		}
+		if gs := t.Get("google_search"); gs.Exists() {
 				googleToolNode := []byte(`{}`)
 				var errSet error
 				googleToolNode, errSet = sjson.SetRawBytes(googleToolNode, "googleSearch", []byte(gs.Raw))

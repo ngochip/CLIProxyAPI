@@ -29,6 +29,26 @@ type RoundRobinSelector struct {
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
 
+// WeightedRoundRobinSelector distributes requests proportionally using priority
+// as weight. Auth A (priority 5) + Auth B (priority 3) → A gets 5/8, B gets 3/8.
+// Priority 0 or unset is treated as weight 1 so every auth participates.
+// Uses smooth weighted round-robin (NGINX-style) to spread requests evenly
+// across cycles instead of bursting all slots for one auth consecutively.
+type WeightedRoundRobinSelector struct {
+	mu    sync.Mutex
+	state map[string]*weightedRRState
+}
+
+type weightedRRState struct {
+	entries []weightedEntry
+}
+
+type weightedEntry struct {
+	authID         string
+	effectiveWeight int
+	currentWeight  int
+}
+
 type blockReason int
 
 const (
@@ -360,6 +380,158 @@ func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, op
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 	return available[0], nil
+}
+
+// getAvailableAuthsAllPriorities returns all non-blocked auths across all priority
+// tiers, sorted by ID for stable ordering. Used by WeightedRoundRobinSelector
+// which needs to see every tier rather than only the highest.
+func getAvailableAuthsAllPriorities(auths []*Auth, provider, model string, now time.Time) ([]*Auth, error) {
+	if len(auths) == 0 {
+		return nil, &Error{Code: "auth_not_found", Message: "no auth candidates"}
+	}
+
+	availableByPriority, cooldownCount, earliest := collectAvailableByPriority(auths, model, now)
+	if len(availableByPriority) == 0 {
+		if cooldownCount == len(auths) && !earliest.IsZero() {
+			providerForError := provider
+			if providerForError == "mixed" {
+				providerForError = ""
+			}
+			resetIn := earliest.Sub(now)
+			if resetIn < 0 {
+				resetIn = 0
+			}
+			return nil, newModelCooldownError(model, providerForError, resetIn)
+		}
+		return nil, &Error{Code: "auth_unavailable", Message: "no auth available"}
+	}
+
+	var available []*Auth
+	for _, bucket := range availableByPriority {
+		available = append(available, bucket...)
+	}
+	if len(available) > 1 {
+		sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
+	}
+	return available, nil
+}
+
+// effectiveWeight converts an auth's priority to a positive weight.
+// Priority <= 0 is normalised to 1 so every auth participates.
+func effectiveWeight(auth *Auth) int {
+	w := authPriority(auth)
+	if w <= 0 {
+		return 1
+	}
+	return w
+}
+
+// Pick selects the next auth using smooth weighted round-robin across all
+// priority tiers. Higher priority means proportionally more selections.
+func (s *WeightedRoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+	_ = opts
+	now := time.Now()
+	available, err := getAvailableAuthsAllPriorities(auths, provider, model, now)
+	if err != nil {
+		return nil, err
+	}
+	available = preferCodexWebsocketAuths(ctx, provider, available)
+	if len(available) == 1 {
+		return available[0], nil
+	}
+
+	key := provider + ":" + canonicalModelKey(model)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.state == nil {
+		s.state = make(map[string]*weightedRRState)
+	}
+
+	st := s.state[key]
+	st = s.reconcile(st, available, key)
+
+	totalWeight := 0
+	for i := range st.entries {
+		st.entries[i].currentWeight += st.entries[i].effectiveWeight
+		totalWeight += st.entries[i].effectiveWeight
+	}
+
+	bestIdx := 0
+	for i := 1; i < len(st.entries); i++ {
+		if st.entries[i].currentWeight > st.entries[bestIdx].currentWeight {
+			bestIdx = i
+		}
+	}
+
+	st.entries[bestIdx].currentWeight -= totalWeight
+
+	for _, auth := range available {
+		if auth.ID == st.entries[bestIdx].authID {
+			return auth, nil
+		}
+	}
+	return available[0], nil
+}
+
+// reconcile rebuilds or prunes the weighted state when the available auth set
+// changes (new auths appear, old ones become blocked). Cursors for surviving
+// entries are preserved so the distribution stays balanced across reconfigurations.
+func (s *WeightedRoundRobinSelector) reconcile(st *weightedRRState, available []*Auth, key string) *weightedRRState {
+	wantIDs := make(map[string]int, len(available))
+	for _, auth := range available {
+		wantIDs[auth.ID] = effectiveWeight(auth)
+	}
+
+	if st != nil {
+		haveIDs := make(map[string]struct{}, len(st.entries))
+		for _, e := range st.entries {
+			haveIDs[e.authID] = struct{}{}
+		}
+		match := len(haveIDs) == len(wantIDs)
+		if match {
+			for id, w := range wantIDs {
+				if _, ok := haveIDs[id]; !ok {
+					match = false
+					break
+				}
+				for i := range st.entries {
+					if st.entries[i].authID == id && st.entries[i].effectiveWeight != w {
+						match = false
+						break
+					}
+				}
+				if !match {
+					break
+				}
+			}
+		}
+		if match {
+			return st
+		}
+	}
+
+	// Carry over currentWeight from surviving entries.
+	oldWeights := make(map[string]int)
+	if st != nil {
+		for _, e := range st.entries {
+			oldWeights[e.authID] = e.currentWeight
+		}
+	}
+
+	entries := make([]weightedEntry, 0, len(available))
+	for _, auth := range available {
+		w := wantIDs[auth.ID]
+		entries = append(entries, weightedEntry{
+			authID:         auth.ID,
+			effectiveWeight: w,
+			currentWeight:  oldWeights[auth.ID],
+		})
+	}
+
+	newState := &weightedRRState{entries: entries}
+	s.state[key] = newState
+	return newState
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {
