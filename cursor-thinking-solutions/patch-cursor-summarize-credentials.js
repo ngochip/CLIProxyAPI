@@ -16,7 +16,7 @@
  *
  * Usage: node patch-cursor-summarize-credentials.js [--restore]
  *
- * Tested on: Cursor 2.6.11, 2.6.14+
+ * Tested on: Cursor 2.6.11, 2.6.14+, 3.0.12
  * Xem CURSOR-ARCHITECTURE.md để hiểu chi tiết kiến trúc.
  */
 
@@ -108,13 +108,15 @@ if (regionStart === -1) {
 const regionEnd = Math.min(data.length, regionStart + 1500);
 const region = data.substring(regionStart, regionEnd);
 
-// Auto-detect class name: f=new <ClassName>({modelName:u.modelConfig?.modelName})
-const modelDetailsRegex = /f=new (\w+)\(\{modelName:u\.modelConfig\?\.modelName\}\)/;
+// Auto-detect: <varName>=new <ClassName>({modelName:<sourceVar>.modelConfig?.modelName})
+// Cursor 2.6.x: f=new Zf({modelName:u.modelConfig?.modelName})
+// Cursor 3.0+:  g=new Qg({modelName:l.modelConfig?.modelName})
+const modelDetailsRegex = /(\w)=new (\w+)\(\{modelName:(\w+)\.modelConfig\?\.modelName\}\)/;
 const regionMatch = region.match(modelDetailsRegex);
 
 if (!regionMatch) {
   console.error("❌ Target pattern not found near summarizeAction.");
-  console.error("   Expected: f=new <ClassName>({modelName:u.modelConfig?.modelName})");
+  console.error("   Expected: <var>=new <ClassName>({modelName:<src>.modelConfig?.modelName})");
   console.error("");
   console.error("   Debug: check summarize method:");
   console.error(
@@ -125,9 +127,11 @@ if (!regionMatch) {
   process.exit(1);
 }
 
-const MODEL_DETAILS_CLASS = regionMatch[1];
-const ORIGINAL = `f=new ${MODEL_DETAILS_CLASS}({modelName:u.modelConfig?.modelName})`;
-console.log(`   ModelDetails class: ${MODEL_DETAILS_CLASS}`);
+const RESULT_VAR = regionMatch[1];
+const MODEL_DETAILS_CLASS = regionMatch[2];
+const SOURCE_VAR = regionMatch[3];
+const ORIGINAL = `${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}.modelConfig?.modelName})`;
+console.log(`   ModelDetails class: ${MODEL_DETAILS_CLASS} (${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}...}))`);
 
 // Verify uniqueness: pattern phải xuất hiện đúng 1 lần trong TOÀN BỘ file
 let count = 0;
@@ -177,7 +181,7 @@ if (!fs.existsSync(PRODUCT_BACKUP)) {
  * NOTE: Class name (Zf, Yf, ...) auto-detected ở trên.
  */
 const PATCHED =
-  `f=new ${MODEL_DETAILS_CLASS}({modelName:u.modelConfig?.modelName,...(()=>{try{const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;return{apiKey:this.cursorAuthenticationService.getApiKeyForModel(u.modelConfig?.modelName),openaiApiBaseUrl:_creds_s.openAIBaseUrl??void 0,azureState:_creds_s.azureState,bedrockState:_creds_s.bedrockState}}catch(_e){return{}}})()})`;
+  `${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}.modelConfig?.modelName,...(()=>{try{const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;return{apiKey:this.cursorAuthenticationService.getApiKeyForModel(${SOURCE_VAR}.modelConfig?.modelName),openaiApiBaseUrl:_creds_s.openAIBaseUrl??void 0,azureState:_creds_s.azureState,bedrockState:_creds_s.bedrockState}}catch(_e){return{}}})()})`;
 
 console.log("🔧 Patching summarize credentials...");
 const patched = data.replace(ORIGINAL, PATCHED);

@@ -22,12 +22,12 @@
  *       It patches _origHandleTextDelta (which the thinking patch creates).
  *       If thinking patch is NOT applied, it patches handleTextDelta directly.
  *
- * Minified helper names (h_/m_, Jw/Gw, etc.) change across Cursor versions.
+ * Minified helper names (h_/m_, Jw/Gw, Oa/Ua, ul/Pc, etc.) change across Cursor versions.
  * This patch uses regex to detect them dynamically.
  *
  * Usage: node patch-cursor-smooth-streaming.js [--restore]
  *
- * Tested on: Cursor 2.6.19+
+ * Tested on: Cursor 2.6.19+, 3.0.12
  */
 
 const fs = require("fs");
@@ -93,55 +93,73 @@ const PATCH_MARKER = "__textWordStreamer";
  * The vkf class reference is found via thinkingWordStreamer constructor.
  *
  * Minified helper names are detected via regex:
- *   - helperFn: h_(), m_(), etc. — creates default bubble object
- *   - batchFn:  Jw(), Gw(), etc. — batches reactive store updates
+ *   - serviceName: Oa, Ua, etc. — composer data service injection token
+ *   - typeEnum:    ul, Pc, etc. — bubble type enum (AI, User, etc.)
+ *   - helperFn:    h_(), m_(), jw(), etc. — creates default bubble object
+ *   - batchFn:     Jw(), Gw(), Hy(), etc. — batches reactive store updates
  */
 
-// Regex matches _origHandleTextDelta body, captures minified helper names
-const ORIG_REGEX = new RegExp(
-  '_origHandleTextDelta\\(n\\)\\{' +
-  'if\\(n\\.length===0\\)return;' +
-  'this\\.cancelUnfinishedToolCalls\\(\\),' +
-  'this\\.notifyFirstTokenIfNeeded\\(\\);' +
-  'const e=this\\.instantiationService\\.invokeFunction\\(a=>a\\.get\\(Oa\\)\\),' +
-  't=e\\.getComposerData\\(this\\.composerDataHandle\\);' +
-  'if\\(!t\\)return;' +
-  'const i=e\\.getLastBubble\\(this\\.composerDataHandle\\),' +
-  'r=i&&t\\.generatingBubbleIds\\?\\.includes\\(i\\.bubbleId\\);' +
-  'if\\(i\\?\\.type!==ul\\.AI\\|\\|i\\.capabilityType!==void 0\\|\\|!r\\)' +
-  '\\{const a=\\{\\.\\.\\.(\\w+)\\(\\),codeBlocks:\\[\\],type:ul\\.AI,text:""\\};' +
-  '(\\w+)\\(\\(\\)=>\\{' +
-  'e\\.appendComposerBubbles\\(this\\.composerDataHandle,\\[a\\]\\),' +
-  'e\\.updateComposerDataSetStore\\(this\\.composerDataHandle,' +
-  'l=>l\\("generatingBubbleIds",\\[a\\.bubbleId\\]\\)\\)\\}\\)\\}' +
-  'const s=e\\.getLastAiBubble\\(this\\.composerDataHandle\\);' +
-  'if\\(!s\\)return;' +
-  'const o=s\\.text\\+n;' +
-  'e\\.updateComposerDataSetStore\\(this\\.composerDataHandle,' +
-  'a=>a\\("conversationMap",s\\.bubbleId,"text",o\\)\\)\\}'
-);
+// Capture groups: (1)=serviceName, (2)=typeEnum, (3)=helperFn, (4)=batchFn
+function buildOrigRegex(cancelPrefix) {
+  return new RegExp(
+    '_origHandleTextDelta\\(n\\)\\{' +
+    'if\\(n\\.length===0\\)return;' +
+    cancelPrefix +
+    'this\\.notifyFirstTokenIfNeeded\\(\\);' +
+    'const e=this\\.instantiationService\\.invokeFunction\\(a=>a\\.get\\((\\w+)\\)\\),' +
+    't=e\\.getComposerData\\(this\\.composerDataHandle\\);' +
+    'if\\(!t\\)return;' +
+    'const i=e\\.getLastBubble\\(this\\.composerDataHandle\\),' +
+    'r=i&&t\\.generatingBubbleIds\\?\\.includes\\(i\\.bubbleId\\);' +
+    'if\\(i\\?\\.type!==(\\w+)\\.AI\\|\\|i\\.capabilityType!==void 0\\|\\|!r\\)' +
+    '\\{const a=\\{\\.\\.\\.(\\w+)\\(\\),codeBlocks:\\[\\],type:\\2\\.AI,text:""\\};' +
+    '(\\w+)\\(\\(\\)=>\\{' +
+    'e\\.appendComposerBubbles\\(this\\.composerDataHandle,\\[a\\]\\),' +
+    'e\\.updateComposerDataSetStore\\(this\\.composerDataHandle,' +
+    'l=>l\\("generatingBubbleIds",\\[a\\.bubbleId\\]\\)\\)\\}\\)\\}' +
+    'const s=e\\.getLastAiBubble\\(this\\.composerDataHandle\\);' +
+    'if\\(!s\\)return;' +
+    'const o=s\\.text\\+n;' +
+    'e\\.updateComposerDataSetStore\\(this\\.composerDataHandle,' +
+    'a=>a\\("conversationMap",s\\.bubbleId,"text",o\\)\\)\\}'
+  );
+}
 
-const origMatch = data.match(ORIG_REGEX);
+// V2 (Cursor 3.0+): this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls()
+// V1 (Cursor 2.6.x): this.cancelUnfinishedToolCalls()
+const ORIG_REGEX_V2 = buildOrigRegex('this\\.options\\.preserveUnfinishedToolsOnNarration\\|\\|this\\.cancelUnfinishedToolCalls\\(\\),');
+const ORIG_REGEX_V1 = buildOrigRegex('this\\.cancelUnfinishedToolCalls\\(\\),');
+
+let origMatch = data.match(ORIG_REGEX_V2);
+let cancelExprSmooth = 'this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls(),';
+let smoothVersion = 'V2 (Cursor 3.0+)';
+if (!origMatch) {
+  origMatch = data.match(ORIG_REGEX_V1);
+  cancelExprSmooth = 'this.cancelUnfinishedToolCalls(),';
+  smoothVersion = 'V1 (Cursor 2.6.x)';
+}
 
 let PATCH_ORIGINAL = null;
 let PATCH_PATCHED = null;
 
 if (origMatch) {
   PATCH_ORIGINAL = origMatch[0];
-  const helperFn = origMatch[1];
-  const batchFn = origMatch[2];
-  console.log(`   Detected helpers: ${helperFn}(), ${batchFn}()`);
+  const serviceName = origMatch[1];
+  const typeEnum = origMatch[2];
+  const helperFn = origMatch[3];
+  const batchFn = origMatch[4];
+  console.log(`   Detected ${smoothVersion}: service=${serviceName}, type=${typeEnum}, helpers: ${helperFn}(), ${batchFn}()`);
 
   PATCH_PATCHED =
     '_origHandleTextDelta(n){if(n.length===0)return;' +
-    'this.cancelUnfinishedToolCalls(),this.notifyFirstTokenIfNeeded();' +
-    'const e=this.instantiationService.invokeFunction(a=>a.get(Oa)),' +
+    cancelExprSmooth + 'this.notifyFirstTokenIfNeeded();' +
+    'const e=this.instantiationService.invokeFunction(a=>a.get(' + serviceName + ')),' +
     't=e.getComposerData(this.composerDataHandle);' +
     'if(!t)return;' +
     'const i=e.getLastBubble(this.composerDataHandle),' +
     'r=i&&t.generatingBubbleIds?.includes(i.bubbleId);' +
-    'if(i?.type!==ul.AI||i.capabilityType!==void 0||!r)' +
-    '{const a={...' + helperFn + '(),codeBlocks:[],type:ul.AI,text:""};' +
+    'if(i?.type!==' + typeEnum + '.AI||i.capabilityType!==void 0||!r)' +
+    '{const a={...' + helperFn + '(),codeBlocks:[],type:' + typeEnum + '.AI,text:""};' +
     batchFn + '(()=>{' +
     'e.appendComposerBubbles(this.composerDataHandle,[a]),' +
     'e.updateComposerDataSetStore(this.composerDataHandle,' +
@@ -156,7 +174,7 @@ if (origMatch) {
     'this.__textWordStreamer.enqueue(n)}' +
     '_flushTextStreamer(){this.__textWordStreamer&&this.__textWordStreamer.flush()}' +
     '_appendTextChunk(n){' +
-    'const e=this.instantiationService.invokeFunction(a=>a.get(Oa)),' +
+    'const e=this.instantiationService.invokeFunction(a=>a.get(' + serviceName + ')),' +
     't=e.getLastAiBubble(this.composerDataHandle);' +
     'if(!t)return;const i=t.text+n;' +
     'e.updateComposerDataSetStore(this.composerDataHandle,' +
@@ -166,8 +184,12 @@ if (origMatch) {
 const FLUSH_INJECT_CANCEL_ORIGINAL = "cancelUnfinishedToolCalls(){";
 const FLUSH_INJECT_CANCEL_PATCHED = "cancelUnfinishedToolCalls(){this._flushTextStreamer&&this._flushTextStreamer();";
 
-const FLUSH_INJECT_THINKING_ORIGINAL = "handleThinkingDelta(n,e){const t=n.length===0;this.cancelUnfinishedToolCalls()";
-const FLUSH_INJECT_THINKING_PATCHED = "handleThinkingDelta(n,e){const t=n.length===0;this._flushTextStreamer&&this._flushTextStreamer();this.cancelUnfinishedToolCalls()";
+// V2 (Cursor 3.0+): handleThinkingDelta cũng dùng preserveUnfinishedToolsOnNarration
+const FLUSH_INJECT_THINKING_V2_ORIG = "handleThinkingDelta(n,e){const t=n.length===0;this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls()";
+const FLUSH_INJECT_THINKING_V2_PATCHED = "handleThinkingDelta(n,e){const t=n.length===0;this._flushTextStreamer&&this._flushTextStreamer();this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls()";
+// V1 (Cursor 2.6.x)
+const FLUSH_INJECT_THINKING_V1_ORIG = "handleThinkingDelta(n,e){const t=n.length===0;this.cancelUnfinishedToolCalls()";
+const FLUSH_INJECT_THINKING_V1_PATCHED = "handleThinkingDelta(n,e){const t=n.length===0;this._flushTextStreamer&&this._flushTextStreamer();this.cancelUnfinishedToolCalls()";
 
 // --- Check current state ---
 const patchApplied = data.includes(PATCH_MARKER);
@@ -238,9 +260,13 @@ if (data.includes(FLUSH_INJECT_CANCEL_ORIGINAL)) {
 }
 
 // --- Apply flush injection to handleThinkingDelta ---
-if (data.includes(FLUSH_INJECT_THINKING_ORIGINAL)) {
-  console.log("🔧 Injecting flush into handleThinkingDelta...");
-  data = data.replace(FLUSH_INJECT_THINKING_ORIGINAL, FLUSH_INJECT_THINKING_PATCHED);
+if (data.includes(FLUSH_INJECT_THINKING_V2_ORIG)) {
+  console.log("🔧 Injecting flush into handleThinkingDelta (V2)...");
+  data = data.replace(FLUSH_INJECT_THINKING_V2_ORIG, FLUSH_INJECT_THINKING_V2_PATCHED);
+  console.log("   ✅ Flush injection applied");
+} else if (data.includes(FLUSH_INJECT_THINKING_V1_ORIG)) {
+  console.log("🔧 Injecting flush into handleThinkingDelta (V1)...");
+  data = data.replace(FLUSH_INJECT_THINKING_V1_ORIG, FLUSH_INJECT_THINKING_V1_PATCHED);
   console.log("   ✅ Flush injection applied");
 } else {
   console.log("⚠️  handleThinkingDelta pattern not found, skipping flush injection");

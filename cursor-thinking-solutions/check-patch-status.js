@@ -15,9 +15,8 @@ const data = fs.readFileSync(WORKBENCH_PATH, "utf8");
 const patches = [
   { name: "Thinking (handleTextDelta)", marker: "__thinkTagState" },
   {
-    name: "Thinking render (loading fix)",
-    marker: "if(t){const N=l,M=N&&!B",
-    note: "native fix",
+    name: "Smooth streaming",
+    marker: "__textWordStreamer",
   },
   {
     name: "Summarize credentials",

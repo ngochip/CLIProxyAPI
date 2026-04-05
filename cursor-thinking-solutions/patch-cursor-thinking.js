@@ -19,7 +19,7 @@
  *   --restore: Khôi phục file gốc từ backup
  *   --force:   Apply patch ngay cả khi đã bị disable (xem DISABLED_PATCHES)
  *
- * Tested on: Cursor 2.6.11, 2.6.18, 2.6.19
+ * Tested on: Cursor 2.6.11, 2.6.18, 2.6.19, 3.0.12
  */
 
 const fs = require("fs");
@@ -100,8 +100,12 @@ let data = fs.readFileSync(WORKBENCH_PATH, "utf8");
 // ============================================================
 
 const PATCH_A_MARKER = "__thinkTagState";
-const PATCH_A_ORIGINAL =
+// Cursor 3.0+ thay đổi: thêm preserveUnfinishedToolsOnNarration check trước cancelUnfinishedToolCalls
+const PATCH_A_ORIGINAL_V2 =
+  "handleTextDelta(n){if(n.length===0)return;this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls()";
+const PATCH_A_ORIGINAL_V1 =
   "handleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolCalls()";
+const PATCH_A_ORIGINAL = null; // auto-detect below
 
 /**
  * Patch A strategy (v6 - nonce-based delimiters, compatible with Cursor 2.6.11+):
@@ -133,7 +137,22 @@ const PATCH_A_ORIGINAL =
  *      - Khi tìm thấy → handleThinkingDelta + handleThinkingCompleted + recursive _after
  *      - Không tìm thấy → buffer partial closing delimiter
  */
-const PATCH_A_PATCHED = 'handleTextDelta(n){if(n.length===0)return;if(!this.__thinkTagState)this.__thinkTagState={active:false,startTime:0,buf:"",nonce:""};const _s=this.__thinkTagState;let _txt=_s.buf+n;_s.buf="";if(!_s.active){const _sm=_txt.match(/<!--thinking-start:([0-9a-f]{8})-->/);if(_sm){const _oi=_sm.index;const _before=_txt.substring(0,_oi);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce=_sm[1];_s.startTime=Date.now();_txt=_txt.substring(_oi+_sm[0].length);if(_txt.length===0)return;}else{const _oi2=_txt.indexOf("<think>");if(_oi2!==-1){const _before=_txt.substring(0,_oi2);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce="";_s.startTime=Date.now();_txt=_txt.substring(_oi2+7);if(_txt.length===0)return;}else{let _bs=-1;for(let _k=Math.max(0,_txt.length-30);_k<_txt.length;_k++){const _tail=_txt.substring(_k);if("<!--thinking-start:".startsWith(_tail)||"<think>".startsWith(_tail)){if(_tail.length>=2){_bs=_k;break;}}}if(_bs!==-1){_s.buf=_txt.substring(_bs);_txt=_txt.substring(0,_bs);}if(_txt.length>0)this._origHandleTextDelta(_txt);return;}}}if(_s.active){let _ci=-1;let _tl=0;if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";_ci=_txt.indexOf(_et);_tl=_et.length;}else{_ci=_txt.indexOf("</think>");_tl=8;}if(_ci!==-1){const _tp=_txt.substring(0,_ci);if(_tp.length>0)this.handleThinkingDelta(_tp);const _dur=Math.max(1000,Date.now()-_s.startTime);_s.active=false;_s.startTime=0;_s.nonce="";const _after=_txt.substring(_ci+_tl);this.handleThinkingCompleted({message:{case:"thinkingCompleted",value:{thinkingDurationMs:_dur}}});if(_after.length>0)this.handleTextDelta(_after);return;}if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";for(let _k=Math.max(0,_txt.length-_et.length+1);_k<_txt.length;_k++){if(_et.startsWith(_txt.substring(_k))&&_txt.substring(_k).length>=2){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}else{for(let _k=Math.max(0,_txt.length-7);_k<_txt.length-1;_k++){if("</think>".startsWith(_txt.substring(_k))){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}if(_txt.length>0)this.handleThinkingDelta(_txt);return;}this._origHandleTextDelta(_txt)}_origHandleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolCalls()';
+// Thinking logic core (shared between V1 and V2)
+function buildPatchA(cancelExpr) {
+  return 'handleTextDelta(n){if(n.length===0)return;if(!this.__thinkTagState)this.__thinkTagState={active:false,startTime:0,buf:"",nonce:""};const _s=this.__thinkTagState;let _txt=_s.buf+n;_s.buf="";if(!_s.active){const _sm=_txt.match(/<!--thinking-start:([0-9a-f]{8})-->/);if(_sm){const _oi=_sm.index;const _before=_txt.substring(0,_oi);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce=_sm[1];_s.startTime=Date.now();_txt=_txt.substring(_oi+_sm[0].length);if(_txt.length===0)return;}else{const _oi2=_txt.indexOf("<think>");if(_oi2!==-1){const _before=_txt.substring(0,_oi2);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce="";_s.startTime=Date.now();_txt=_txt.substring(_oi2+7);if(_txt.length===0)return;}else{let _bs=-1;for(let _k=Math.max(0,_txt.length-30);_k<_txt.length;_k++){const _tail=_txt.substring(_k);if("<!--thinking-start:".startsWith(_tail)||"<think>".startsWith(_tail)){if(_tail.length>=2){_bs=_k;break;}}}if(_bs!==-1){_s.buf=_txt.substring(_bs);_txt=_txt.substring(0,_bs);}if(_txt.length>0)this._origHandleTextDelta(_txt);return;}}}if(_s.active){let _ci=-1;let _tl=0;if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";_ci=_txt.indexOf(_et);_tl=_et.length;}else{_ci=_txt.indexOf("</think>");_tl=8;}if(_ci!==-1){const _tp=_txt.substring(0,_ci);if(_tp.length>0)this.handleThinkingDelta(_tp);const _dur=Math.max(1000,Date.now()-_s.startTime);_s.active=false;_s.startTime=0;_s.nonce="";const _after=_txt.substring(_ci+_tl);this.handleThinkingCompleted({message:{case:"thinkingCompleted",value:{thinkingDurationMs:_dur}}});if(_after.length>0)this.handleTextDelta(_after);return;}if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";for(let _k=Math.max(0,_txt.length-_et.length+1);_k<_txt.length;_k++){if(_et.startsWith(_txt.substring(_k))&&_txt.substring(_k).length>=2){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}else{for(let _k=Math.max(0,_txt.length-7);_k<_txt.length-1;_k++){if("</think>".startsWith(_txt.substring(_k))){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}if(_txt.length>0)this.handleThinkingDelta(_txt);return;}this._origHandleTextDelta(_txt)}_origHandleTextDelta(n){if(n.length===0)return;' + cancelExpr;
+}
+
+// --- Auto-detect pattern version ---
+let detectedOriginal = null;
+let detectedVersion = null;
+
+if (data.includes(PATCH_A_ORIGINAL_V2)) {
+  detectedOriginal = PATCH_A_ORIGINAL_V2;
+  detectedVersion = "V2 (Cursor 3.0+)";
+} else if (data.includes(PATCH_A_ORIGINAL_V1)) {
+  detectedOriginal = PATCH_A_ORIGINAL_V1;
+  detectedVersion = "V1 (Cursor 2.6.x)";
+}
 
 // --- Check current state ---
 const patchAApplied = data.includes(PATCH_A_MARKER);
@@ -149,6 +168,9 @@ console.log("📊 Patch status:");
 console.log(
   `   Patch A (handleTextDelta): ${patchAApplied ? "✅ applied" : "⏳ pending"}`
 );
+if (detectedVersion) {
+  console.log(`   Detected pattern: ${detectedVersion}`);
+}
 console.log("");
 
 // --- Backup ---
@@ -176,13 +198,20 @@ if (DISABLED_PATCHES.A && !forceApply) {
     `⏭️  Patch A skipped: ${DISABLED_PATCHES.A}\n   Dùng --force để apply.\n`
   );
 } else {
-  const countA = countOccurrences(data, PATCH_A_ORIGINAL);
-  if (countA === 0) {
+  if (!detectedOriginal) {
     console.error(
       "❌ Patch A: handleTextDelta pattern not found. Cursor version may be incompatible."
     );
+    console.error(
+      "   Tried V2 (3.0+): ...preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls()"
+    );
+    console.error(
+      "   Tried V1 (2.6.x): ...this.cancelUnfinishedToolCalls()"
+    );
     process.exit(1);
   }
+
+  const countA = countOccurrences(data, detectedOriginal);
   if (countA !== 1) {
     console.error(
       `❌ Patch A: Found ${countA} occurrences of handleTextDelta. Expected 1.`
@@ -190,10 +219,16 @@ if (DISABLED_PATCHES.A && !forceApply) {
     process.exit(1);
   }
 
+  // Build patched version based on detected version
+  const cancelExpr = detectedOriginal === PATCH_A_ORIGINAL_V2
+    ? "this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls()"
+    : "this.cancelUnfinishedToolCalls()";
+  const PATCH_A_PATCHED = buildPatchA(cancelExpr);
+
   console.log(
-    "🔧 Applying Patch A: handleTextDelta → thinking delimiter detection..."
+    `🔧 Applying Patch A (${detectedVersion}): handleTextDelta → thinking delimiter detection...`
   );
-  data = data.replace(PATCH_A_ORIGINAL, PATCH_A_PATCHED);
+  data = data.replace(detectedOriginal, PATCH_A_PATCHED);
 
   if (!data.includes(PATCH_A_MARKER)) {
     console.error("❌ Patch A failed.");
