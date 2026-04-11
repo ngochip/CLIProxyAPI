@@ -100,20 +100,21 @@ const PATCH_MARKER = "__textWordStreamer";
  */
 
 // Capture groups: (1)=serviceName, (2)=typeEnum, (3)=helperFn, (4)=batchFn
+// Dùng [\\w$]+ thay vì \\w+ vì minified identifier có thể chứa $ (vd: $l, $e)
 function buildOrigRegex(cancelPrefix) {
   return new RegExp(
     '_origHandleTextDelta\\(n\\)\\{' +
     'if\\(n\\.length===0\\)return;' +
     cancelPrefix +
     'this\\.notifyFirstTokenIfNeeded\\(\\);' +
-    'const e=this\\.instantiationService\\.invokeFunction\\(a=>a\\.get\\((\\w+)\\)\\),' +
+    'const e=this\\.instantiationService\\.invokeFunction\\(a=>a\\.get\\(([\\w$]+)\\)\\),' +
     't=e\\.getComposerData\\(this\\.composerDataHandle\\);' +
     'if\\(!t\\)return;' +
     'const i=e\\.getLastBubble\\(this\\.composerDataHandle\\),' +
     'r=i&&t\\.generatingBubbleIds\\?\\.includes\\(i\\.bubbleId\\);' +
-    'if\\(i\\?\\.type!==(\\w+)\\.AI\\|\\|i\\.capabilityType!==void 0\\|\\|!r\\)' +
-    '\\{const a=\\{\\.\\.\\.(\\w+)\\(\\),codeBlocks:\\[\\],type:\\2\\.AI,text:""\\};' +
-    '(\\w+)\\(\\(\\)=>\\{' +
+    'if\\(i\\?\\.type!==([\\w$]+)\\.AI\\|\\|i\\.capabilityType!==void 0\\|\\|!r\\)' +
+    '\\{const a=\\{\\.\\.\\.([\\w$]+)\\(\\),codeBlocks:\\[\\],type:\\2\\.AI,text:""\\};' +
+    '([\\w$]+)\\(\\(\\)=>\\{' +
     'e\\.appendComposerBubbles\\(this\\.composerDataHandle,\\[a\\]\\),' +
     'e\\.updateComposerDataSetStore\\(this\\.composerDataHandle,' +
     'l=>l\\("generatingBubbleIds",\\[a\\.bubbleId\\]\\)\\)\\}\\)\\}' +

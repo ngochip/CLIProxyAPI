@@ -84,6 +84,14 @@ if (data.includes(PATCH_MARKER)) {
   process.exit(0);
 }
 
+// Thinking patch (Patch B) cũng patch summarize credentials với marker khác
+if (data.includes("__summarize_creds_patched")) {
+  console.log(
+    "ℹ️  Already patched by patch-cursor-thinking.js (Patch B). Skipping."
+  );
+  process.exit(0);
+}
+
 // Verify summarizeAction exists (anchor point)
 if (!data.includes('"summarizeAction"')) {
   console.error("❌ 'summarizeAction' not found. Cursor version may be incompatible.");
@@ -111,7 +119,8 @@ const region = data.substring(regionStart, regionEnd);
 // Auto-detect: <varName>=new <ClassName>({modelName:<sourceVar>.modelConfig?.modelName})
 // Cursor 2.6.x: f=new Zf({modelName:u.modelConfig?.modelName})
 // Cursor 3.0+:  g=new Qg({modelName:l.modelConfig?.modelName})
-const modelDetailsRegex = /(\w)=new (\w+)\(\{modelName:(\w+)\.modelConfig\?\.modelName\}\)/;
+// Dùng [\w$] vì minified identifier có thể chứa $ (vd: $l, $e)
+const modelDetailsRegex = /([\w$])=new ([\w$]+)\(\{modelName:([\w$]+)\.modelConfig\?\.modelName\}\)/;
 const regionMatch = region.match(modelDetailsRegex);
 
 if (!regionMatch) {

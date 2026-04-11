@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 
 /**
- * Patch Cursor IDE workbench to render thinking delimiters as native thinking blocks.
+ * Patch Cursor IDE workbench.
  *
  * Patch A: handleTextDelta - detect thinking delimiters → redirect sang handleThinkingDelta
+ *   v6 (nonce-based delimiters):
+ *     Proxy gửi nonce-based delimiters thay vì <think>/<\/think>:
+ *       <!--thinking-start:XXXXXXXX--> / <!--thinking-end:XXXXXXXX-->
+ *     Backward compatible: vẫn detect legacy <think>/<\/think> format.
  *
- * v6 (nonce-based delimiters):
- *   Proxy gửi nonce-based delimiters thay vì <think>/<\/think>:
- *     <!--thinking-start:XXXXXXXX--> (opening, XXXXXXXX = 8 hex chars random)
- *     <!--thinking-end:XXXXXXXX-->   (closing, cùng nonce)
- *   Nonce đảm bảo không bao giờ false-positive khi thinking content chứa
- *   </think>, code blocks, XML tags, etc.
- *   Backward compatible: vẫn detect legacy <think>/<\/think> format.
- *
- * NOTE: Patch B (thinking render loading fix) không còn cần thiết từ Cursor 2.6.11+
+ * Patch B: summarize() - thêm credentials vào model details khi summarize
+ *   Cursor mới (3.0+) không gửi apiKey/openaiApiBaseUrl khi summarize,
+ *   nên Cursor server không forward request qua proxy.
+ *   Patch này thêm credentials (apiKey + proxy URL) giống normal chat,
+ *   để summarize request được forward qua proxy.
  *
  * Usage: node patch-cursor-thinking.js [--restore] [--force]
  *   --restore: Khôi phục file gốc từ backup
@@ -156,10 +156,11 @@ if (data.includes(PATCH_A_ORIGINAL_V2)) {
 
 // --- Check current state ---
 const patchAApplied = data.includes(PATCH_A_MARKER);
+const patchBAlreadyApplied = data.includes("__summarize_creds_patched");
 
-if (patchAApplied) {
+if (patchAApplied && patchBAlreadyApplied) {
   console.log(
-    "ℹ️  Patch already applied. Use --restore to revert, then patch again."
+    "ℹ️  All patches already applied. Use --restore to revert, then patch again."
   );
   process.exit(0);
 }
@@ -167,6 +168,9 @@ if (patchAApplied) {
 console.log("📊 Patch status:");
 console.log(
   `   Patch A (handleTextDelta): ${patchAApplied ? "✅ applied" : "⏳ pending"}`
+);
+console.log(
+  `   Patch B (summarize no-creds): ${patchBAlreadyApplied ? "✅ applied" : "⏳ pending"}`
 );
 if (detectedVersion) {
   console.log(`   Detected pattern: ${detectedVersion}`);
@@ -176,10 +180,12 @@ console.log("");
 // --- Backup ---
 // Luôn refresh backup từ unpatched source khi Cursor update
 // (backup cũ có thể từ version trước, restore sẽ gây lỗi)
+const noPatchAppliedYet = !patchAApplied && !patchBAlreadyApplied;
+
 if (!fs.existsSync(WORKBENCH_BACKUP)) {
   console.log("💾 Backing up workbench...");
   fs.copyFileSync(WORKBENCH_PATH, WORKBENCH_BACKUP);
-} else if (!patchAApplied) {
+} else if (noPatchAppliedYet) {
   console.log("💾 Refreshing workbench backup (Cursor may have been updated)...");
   fs.copyFileSync(WORKBENCH_PATH, WORKBENCH_BACKUP);
 }
@@ -187,13 +193,15 @@ if (!fs.existsSync(WORKBENCH_BACKUP)) {
 if (!fs.existsSync(PRODUCT_BACKUP)) {
   console.log("💾 Backing up product.json...");
   fs.copyFileSync(PRODUCT_PATH, PRODUCT_BACKUP);
-} else if (!patchAApplied) {
+} else if (noPatchAppliedYet) {
   console.log("💾 Refreshing product.json backup...");
   fs.copyFileSync(PRODUCT_PATH, PRODUCT_BACKUP);
 }
 
 // --- Apply Patch A ---
-if (DISABLED_PATCHES.A && !forceApply) {
+if (patchAApplied) {
+  console.log("ℹ️  Patch A already applied, skipping.");
+} else if (DISABLED_PATCHES.A && !forceApply) {
   console.log(
     `⏭️  Patch A skipped: ${DISABLED_PATCHES.A}\n   Dùng --force để apply.\n`
   );
@@ -219,7 +227,6 @@ if (DISABLED_PATCHES.A && !forceApply) {
     process.exit(1);
   }
 
-  // Build patched version based on detected version
   const cancelExpr = detectedOriginal === PATCH_A_ORIGINAL_V2
     ? "this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls()"
     : "this.cancelUnfinishedToolCalls()";
@@ -235,6 +242,110 @@ if (DISABLED_PATCHES.A && !forceApply) {
     process.exit(1);
   }
   console.log("   ✅ Patch A applied");
+}
+
+// ============================================================
+// Patch B: summarize() - bỏ credentials, force built-in model
+// ============================================================
+
+const PATCH_B_MARKER = "__summarize_creds_patched";
+
+// Hardcoded patterns cho backward compatibility
+const PATCH_B_ORIGINAL_V2 =
+  'f=new Yf({modelName:l.modelConfig?.modelName})';
+const PATCH_B_ORIGINAL_V1 =
+  'f=new jf({modelName:l.modelConfig?.modelName})';
+
+// Auto-detect regex cho bất kỳ class name nào (vd: Yf, jf, Qg, $f...)
+// Dùng [\w$] vì minified identifier có thể chứa $
+const PATCH_B_AUTO_REGEX = /([\w$])=new ([\w$]+)\(\{modelName:([\w$]+)\.modelConfig\?\.modelName\}\)/;
+
+// Thêm credentials vào Yf/jf constructor giống normal chat
+// → convertModelDetailsToCredentials(f) sẽ trả về apiKeyCredentials với proxy baseUrl
+// → Cursor server forward summarize request qua proxy
+function buildPatchB(className, resultVar, sourceVar) {
+  resultVar = resultVar || 'f';
+  sourceVar = sourceVar || 'l';
+  return resultVar + '=new ' + className + '({modelName:' + sourceVar + '.modelConfig?.modelName,apiKey:this.cursorAuthenticationService.getApiKeyForModel(' + sourceVar + '.modelConfig?.modelName),openaiApiBaseUrl:this.reactiveStorageService.applicationUserPersistentStorage.openAIBaseUrl??void 0})/*' + PATCH_B_MARKER + '*/';
+}
+
+const patchBApplied = data.includes(PATCH_B_MARKER);
+
+console.log(
+  `   Patch B (summarize no-creds): ${patchBApplied ? "✅ applied" : "⏳ pending"}`
+);
+
+if (!patchBApplied) {
+  if (DISABLED_PATCHES.B && !forceApply) {
+    console.log(
+      `⏭️  Patch B skipped: ${DISABLED_PATCHES.B}\n   Dùng --force để apply.\n`
+    );
+  } else {
+    let detectedBOriginal = null;
+    let detectedBVersion = null;
+    let detectedClassName = null;
+    let detectedResultVar = 'f';
+    let detectedSourceVar = 'l';
+
+    if (data.includes(PATCH_B_ORIGINAL_V2)) {
+      detectedBOriginal = PATCH_B_ORIGINAL_V2;
+      detectedBVersion = "V2 (Yf without creds)";
+      detectedClassName = "Yf";
+    } else if (data.includes(PATCH_B_ORIGINAL_V1)) {
+      detectedBOriginal = PATCH_B_ORIGINAL_V1;
+      detectedBVersion = "V1 (jf without creds)";
+      detectedClassName = "jf";
+    } else {
+      // Auto-detect: tìm gần "summarizeAction" bằng regex
+      const anchor = '"summarizeAction"';
+      const anchorIdx = data.indexOf(anchor);
+      if (anchorIdx !== -1) {
+        const region = data.substring(anchorIdx, Math.min(data.length, anchorIdx + 1500));
+        const autoMatch = region.match(PATCH_B_AUTO_REGEX);
+        if (autoMatch) {
+          detectedBOriginal = autoMatch[0];
+          detectedResultVar = autoMatch[1];
+          detectedClassName = autoMatch[2];
+          detectedSourceVar = autoMatch[3];
+          detectedBVersion = `auto-detected (${detectedClassName} without creds)`;
+        }
+      }
+    }
+
+    if (!detectedBOriginal) {
+      console.error(
+        "❌ Patch B: summarize model pattern not found. Cursor version may be incompatible."
+      );
+      console.error(
+        "   Tried V2: f=new Yf({modelName:...})"
+      );
+      console.error(
+        "   Tried V1: f=new jf({modelName:...})"
+      );
+      console.error(
+        "   Tried auto-detect regex near summarizeAction"
+      );
+    } else {
+      const countB = countOccurrences(data, detectedBOriginal);
+      if (countB !== 1) {
+        console.error(
+          `❌ Patch B: Found ${countB} occurrences. Expected 1.`
+        );
+      } else {
+        const PATCH_B_PATCHED = buildPatchB(detectedClassName, detectedResultVar, detectedSourceVar);
+        console.log(
+          `🔧 Applying Patch B (${detectedBVersion}): summarize() → add credentials to ${detectedClassName}...`
+        );
+        data = data.replace(detectedBOriginal, PATCH_B_PATCHED);
+
+        if (!data.includes(PATCH_B_MARKER)) {
+          console.error("❌ Patch B failed.");
+          process.exit(1);
+        }
+        console.log("   ✅ Patch B applied");
+      }
+    }
+  }
 }
 
 // --- Check if any patch was actually applied ---
