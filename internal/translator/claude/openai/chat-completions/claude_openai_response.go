@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -89,7 +90,7 @@ func calculateClaudeUsageTokens(usage gjson.Result) (promptTokens, completionTok
 //
 // Returns:
 //   - [][]byte: A slice of OpenAI-compatible JSON responses
-func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
+func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
 	if *param == nil {
 		*param = &ConvertAnthropicResponseToOpenAIParams{
 			CreatedAt:    0,
@@ -268,6 +269,7 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 			template, _ = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
 			inputTokens := promptTokens - cacheCreation - cacheRead
 			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, completionTokens, cacheCreation, cacheRead, totalTokens)
+			logging.RecordTokenUsage(ctx, "input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d", inputTokens, completionTokens, cacheCreation, cacheRead, totalTokens)
 		}
 		return [][]byte{template}
 
@@ -379,7 +381,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 //
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertClaudeResponseToOpenAINonStream(ctx context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))
@@ -494,6 +496,7 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string,
 				out, _ = sjson.SetBytes(out, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
 				inputTokens := promptTokens - cacheCreation - cacheRead
 				log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, completionTokens, cacheCreation, cacheRead, totalTokens)
+				logging.RecordTokenUsage(ctx, "input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d", inputTokens, completionTokens, cacheCreation, cacheRead, totalTokens)
 			}
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
@@ -196,7 +197,7 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 		}
 	}
 
-	logClaudeTokenUsage(modelName, resp)
+	logClaudeTokenUsage(c, modelName, resp)
 
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
@@ -320,11 +321,14 @@ func (h *ClaudeCodeAPIHandler) forwardClaudeStream(c *gin.Context, flusher http.
 			_, _ = fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", errorBytes)
 		},
 		WriteDone: func() {
-			// Log tổng token usage sau khi stream hoàn thành
 			if inputTokens > 0 || outputTokens > 0 {
 				totalTokens := inputTokens + outputTokens + cacheCreationInputTokens + cacheReadInputTokens
 				log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.",
 					modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens)
+				if summary := logging.GetOrCreateSummary(c); summary != nil {
+					summary.SetTokenUsage(fmt.Sprintf("input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d",
+						inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens))
+				}
 			}
 		},
 	})
@@ -352,7 +356,7 @@ func (h *ClaudeCodeAPIHandler) toClaudeError(msg *interfaces.ErrorMessage) claud
 
 // logClaudeTokenUsage ghi log thông tin token usage từ response Claude
 // Response format: {"usage": {"input_tokens": N, "output_tokens": N, "cache_creation_input_tokens": N, "cache_read_input_tokens": N}}
-func logClaudeTokenUsage(modelName string, resp []byte) {
+func logClaudeTokenUsage(c *gin.Context, modelName string, resp []byte) {
 	usage := gjson.GetBytes(resp, "usage")
 	if !usage.Exists() {
 		return
@@ -366,6 +370,10 @@ func logClaudeTokenUsage(modelName string, resp []byte) {
 
 	log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.",
 		modelName, inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens)
+	if summary := logging.GetOrCreateSummary(c); summary != nil {
+		summary.SetTokenUsage(fmt.Sprintf("input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d",
+			inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, totalTokens))
+	}
 }
 
 // parseStreamingTokenUsage parse streaming events để tích lũy token usage

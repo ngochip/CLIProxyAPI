@@ -1271,7 +1271,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		logAuthSelection(entry, auth, provider, req.Model, opts.Metadata)
+		logAuthSelection(ctx, entry, auth, provider, req.Model, opts.Metadata)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1349,7 +1349,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		logAuthSelection(entry, auth, provider, req.Model, opts.Metadata)
+		logAuthSelection(ctx, entry, auth, provider, req.Model, opts.Metadata)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1435,7 +1435,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		logAuthSelection(entry, auth, provider, req.Model, opts.Metadata)
+		logAuthSelection(ctx, entry, auth, provider, req.Model, opts.Metadata)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -3295,7 +3295,7 @@ func logEntryWithRequestID(ctx context.Context) *log.Entry {
 	return log.NewEntry(log.StandardLogger())
 }
 
-func logAuthSelection(entry *log.Entry, auth *Auth, provider string, model string, metadata map[string]any) {
+func logAuthSelection(ctx context.Context, entry *log.Entry, auth *Auth, provider string, model string, metadata map[string]any) {
 	if entry == nil || auth == nil {
 		return
 	}
@@ -3309,12 +3309,17 @@ func logAuthSelection(entry *log.Entry, auth *Auth, provider string, model strin
 	if pinned := pinnedAuthIDFromMetadata(metadata); pinned != "" {
 		routeMode = "sticky"
 	}
+	var authDesc string
 	switch accountType {
 	case "api_key":
-		entry.Infof("Use API key %s for model %s [%s]%s", util.HideAPIKey(accountInfo), model, routeMode, suffix)
+		authDesc = "API key " + util.HideAPIKey(accountInfo)
+		entry.Infof("Use %s for model %s [%s]%s", authDesc, model, routeMode, suffix)
 	case "oauth":
-		ident := formatOauthIdentity(auth, provider, accountInfo)
-		entry.Infof("Use OAuth %s for model %s [%s]%s", ident, model, routeMode, suffix)
+		authDesc = "OAuth " + formatOauthIdentity(auth, provider, accountInfo)
+		entry.Infof("Use %s for model %s [%s]%s", authDesc, model, routeMode, suffix)
+	}
+	if summary := logging.GetSummaryFromContext(ctx); summary != nil {
+		summary.SetAuth(authDesc, routeMode, model)
 	}
 }
 

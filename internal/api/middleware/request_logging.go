@@ -40,7 +40,6 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
-		startTime := time.Now()
 		loggerEnabled := logger.IsEnabled()
 
 		// Capture request information
@@ -55,13 +54,13 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		}
 
 		clientAPIKey := extractClientAPIKey(c)
+		receivedMsg := "🔵 Request received"
+		if clientAPIKey != "" {
+			receivedMsg += " [" + clientAPIKey + "]"
+		}
 		log.WithFields(log.Fields{
 			"request_id": requestInfo.RequestID,
-			"method":     requestInfo.Method,
-			"path":       requestInfo.URL,
-			"client_ip":  c.ClientIP(),
-			"api_key":    clientAPIKey,
-		}).Info("🔵 Request received")
+		}).Info(receivedMsg)
 
 		// Create response writer wrapper
 		wrapper := NewResponseWriterWrapper(c.Writer, logger, requestInfo)
@@ -73,25 +72,32 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 		// Process the request
 		c.Next()
 
-		duration := time.Since(startTime)
-
 		statusCode := c.Writer.Status()
+		completedMsg := "🟢 Request completed"
+		if statusCode >= 500 {
+			completedMsg = "🔴 Request failed"
+		} else if statusCode >= 400 {
+			completedMsg = "🟡 Request error"
+		}
+		if clientAPIKey != "" {
+			completedMsg += " api:[" + clientAPIKey + "]"
+		}
+		if summary := logging.GetSummary(c); summary != nil {
+			if s := summary.String(); s != "" {
+				completedMsg += " " + s
+			}
+		}
+
 		logEntry := log.WithFields(log.Fields{
-			"request_id":  requestInfo.RequestID,
-			"method":      requestInfo.Method,
-			"path":        requestInfo.URL,
-			"status":      statusCode,
-			"duration":    duration.String(),
-			"duration_ms": duration.Milliseconds(),
-			"api_key":     clientAPIKey,
+			"request_id": requestInfo.RequestID,
 		})
 
 		if statusCode >= 500 {
-			logEntry.Error("🔴 Request completed with server error")
+			logEntry.Error(completedMsg)
 		} else if statusCode >= 400 {
-			logEntry.Warn("🟡 Request completed with client error")
+			logEntry.Warn(completedMsg)
 		} else {
-			logEntry.Info("🟢 Request completed successfully")
+			logEntry.Info(completedMsg)
 		}
 
 		// Finalize logging after request processing
