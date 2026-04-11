@@ -63,16 +63,17 @@ func generateThinkingNonce() string {
 	return hex.EncodeToString(b)
 }
 
-func calculateClaudeUsageTokens(usage gjson.Result) (promptTokens, completionTokens, totalTokens, cachedTokens int64) {
+func calculateClaudeUsageTokens(usage gjson.Result) (promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreationTokens, cacheReadTokens int64) {
 	inputTokens := usage.Get("input_tokens").Int()
 	completionTokens = usage.Get("output_tokens").Int()
-	cachedTokens = usage.Get("cache_read_input_tokens").Int()
-	cacheCreationInputTokens := usage.Get("cache_creation_input_tokens").Int()
+	cacheReadTokens = usage.Get("cache_read_input_tokens").Int()
+	cacheCreationTokens = usage.Get("cache_creation_input_tokens").Int()
+	cachedTokens = cacheReadTokens
 
-	promptTokens = inputTokens + cacheCreationInputTokens + cachedTokens
+	promptTokens = inputTokens + cacheCreationTokens + cacheReadTokens
 	totalTokens = promptTokens + completionTokens
 
-	return promptTokens, completionTokens, totalTokens, cachedTokens
+	return
 }
 
 // ConvertClaudeResponseToOpenAI converts Claude Code streaming response format to OpenAI Chat Completions format.
@@ -260,12 +261,13 @@ func ConvertClaudeResponseToOpenAI(_ context.Context, modelName string, original
 
 		// Handle usage information for token counts
 		if usage := root.Get("usage"); usage.Exists() {
-			promptTokens, completionTokens, totalTokens, cachedTokens := calculateClaudeUsageTokens(usage)
+			promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreation, cacheRead := calculateClaudeUsageTokens(usage)
 			template, _ = sjson.SetBytes(template, "usage.prompt_tokens", promptTokens)
 			template, _ = sjson.SetBytes(template, "usage.completion_tokens", completionTokens)
 			template, _ = sjson.SetBytes(template, "usage.total_tokens", totalTokens)
 			template, _ = sjson.SetBytes(template, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
-			log.Infof("Request Claude %s. prompt_tokens: %d, completion_tokens: %d, total_tokens: %d.", modelName, promptTokens, completionTokens, totalTokens)
+			inputTokens := promptTokens - cacheCreation - cacheRead
+			log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, completionTokens, cacheCreation, cacheRead, totalTokens)
 		}
 		return [][]byte{template}
 
@@ -377,7 +379,7 @@ func mapAnthropicStopReasonToOpenAI(anthropicReason string) string {
 //
 // Returns:
 //   - []byte: An OpenAI-compatible JSON response containing all message content and metadata
-func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
+func ConvertClaudeResponseToOpenAINonStream(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, _ *any) []byte {
 	chunks := make([][]byte, 0)
 
 	lines := bytes.Split(rawJSON, []byte("\n"))
@@ -485,11 +487,13 @@ func ConvertClaudeResponseToOpenAINonStream(_ context.Context, _ string, origina
 				}
 			}
 			if usage := root.Get("usage"); usage.Exists() {
-				promptTokens, completionTokens, totalTokens, cachedTokens := calculateClaudeUsageTokens(usage)
+				promptTokens, completionTokens, totalTokens, cachedTokens, cacheCreation, cacheRead := calculateClaudeUsageTokens(usage)
 				out, _ = sjson.SetBytes(out, "usage.prompt_tokens", promptTokens)
 				out, _ = sjson.SetBytes(out, "usage.completion_tokens", completionTokens)
 				out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
 				out, _ = sjson.SetBytes(out, "usage.prompt_tokens_details.cached_tokens", cachedTokens)
+				inputTokens := promptTokens - cacheCreation - cacheRead
+				log.Infof("Request Claude %s. input_tokens: %d, output_tokens: %d, cache_creation_input_tokens: %d, cache_read_input_tokens: %d, totalTokens: %d.", modelName, inputTokens, completionTokens, cacheCreation, cacheRead, totalTokens)
 			}
 		}
 	}

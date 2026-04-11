@@ -54,11 +54,13 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			return
 		}
 
+		clientAPIKey := extractClientAPIKey(c)
 		log.WithFields(log.Fields{
 			"request_id": requestInfo.RequestID,
 			"method":     requestInfo.Method,
 			"path":       requestInfo.URL,
 			"client_ip":  c.ClientIP(),
+			"api_key":    clientAPIKey,
 		}).Info("🔵 Request received")
 
 		// Create response writer wrapper
@@ -81,6 +83,7 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 			"status":      statusCode,
 			"duration":    duration.String(),
 			"duration_ms": duration.Milliseconds(),
+			"api_key":     clientAPIKey,
 		})
 
 		if statusCode >= 500 {
@@ -180,6 +183,21 @@ func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) 
 		RequestID: logging.GetGinRequestID(c),
 		Timestamp: time.Now(),
 	}, nil
+}
+
+// extractClientAPIKey extracts and masks the client API key from request headers.
+func extractClientAPIKey(c *gin.Context) string {
+	apiKey := ""
+	if auth := strings.TrimSpace(c.GetHeader("Authorization")); auth != "" {
+		apiKey = strings.TrimPrefix(auth, "Bearer ")
+	}
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(c.GetHeader("x-api-key"))
+	}
+	if apiKey == "" {
+		return ""
+	}
+	return util.HideAPIKey(apiKey)
 }
 
 // shouldLogRequest determines whether the request should be logged.

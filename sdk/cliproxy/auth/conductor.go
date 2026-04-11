@@ -1271,7 +1271,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		logAuthSelection(entry, auth, provider, req.Model, opts.Metadata)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1349,7 +1349,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		logAuthSelection(entry, auth, provider, req.Model, opts.Metadata)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -1435,7 +1435,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 
 		entry := logEntryWithRequestID(ctx)
-		debugLogAuthSelection(entry, auth, provider, req.Model)
+		logAuthSelection(entry, auth, provider, req.Model, opts.Metadata)
 		publishSelectedAuthMetadata(opts.Metadata, auth.ID)
 
 		tried[auth.ID] = struct{}{}
@@ -3295,10 +3295,7 @@ func logEntryWithRequestID(ctx context.Context) *log.Entry {
 	return log.NewEntry(log.StandardLogger())
 }
 
-func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model string) {
-	if !log.IsLevelEnabled(log.DebugLevel) {
-		return
-	}
+func logAuthSelection(entry *log.Entry, auth *Auth, provider string, model string, metadata map[string]any) {
 	if entry == nil || auth == nil {
 		return
 	}
@@ -3308,12 +3305,16 @@ func debugLogAuthSelection(entry *log.Entry, auth *Auth, provider string, model 
 	if proxyInfo != "" {
 		suffix = " " + proxyInfo
 	}
+	routeMode := "random"
+	if pinned := pinnedAuthIDFromMetadata(metadata); pinned != "" {
+		routeMode = "sticky"
+	}
 	switch accountType {
 	case "api_key":
-		entry.Debugf("Use API key %s for model %s%s", util.HideAPIKey(accountInfo), model, suffix)
+		entry.Infof("Use API key %s for model %s [%s]%s", util.HideAPIKey(accountInfo), model, routeMode, suffix)
 	case "oauth":
 		ident := formatOauthIdentity(auth, provider, accountInfo)
-		entry.Debugf("Use OAuth %s for model %s%s", ident, model, suffix)
+		entry.Infof("Use OAuth %s for model %s [%s]%s", ident, model, routeMode, suffix)
 	}
 }
 
