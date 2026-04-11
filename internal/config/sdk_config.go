@@ -42,6 +42,11 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// StickySession pins all requests from the same conversation to a single auth credential.
+	// This improves prompt cache hit rates when using multiple OAuth accounts, since
+	// Anthropic's prompt cache is scoped per-account.
+	StickySession StickySessionConfig `yaml:"sticky-session,omitempty" json:"sticky-session,omitempty"`
 }
 
 const defaultMaxTokensCap = 16384
@@ -63,6 +68,16 @@ func (c *SDKConfig) GetMaxTokensCap() int {
 		return c.MaxTokensCap
 	}
 	return defaultMaxTokensCap
+}
+
+// StickySessionConfig configures conversation-level auth pinning for better prompt cache utilization.
+type StickySessionConfig struct {
+	// Enabled activates sticky session routing. Default: false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// TTLMinutes is how long a conversation→auth mapping is kept alive.
+	// Default: 30 minutes.
+	TTLMinutes int `yaml:"ttl-minutes,omitempty" json:"ttl-minutes,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

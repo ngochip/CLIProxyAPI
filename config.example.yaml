@@ -140,6 +140,13 @@ quota-exceeded:
 routing:
   strategy: "round-robin"
 
+# Sticky session pins all requests from the same conversation to a single OAuth account.
+# This dramatically improves Anthropic prompt cache hit rates (cache is per-account).
+# Conversations are identified by hashing first user message + user_id from metadata.
+# sticky-session:
+#   enabled: false
+#   ttl-minutes: 30    # How long a conversation→account mapping is kept (default: 30)
+
 # When true, enable authentication for the WebSocket API (/v1/ws).
 ws-auth: false
 

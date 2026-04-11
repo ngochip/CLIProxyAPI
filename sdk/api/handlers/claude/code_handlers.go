@@ -162,6 +162,7 @@ func (h *ClaudeCodeAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSO
 	c.Header("Content-Type", "application/json")
 	alt := h.GetAlt(c)
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = handlers.ApplyStickySession(cliCtx, h.Cfg, rawJSON)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
@@ -225,9 +226,8 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
 
-	// Create a cancellable context for the backend client request
-	// This allows proper cleanup and cancellation of ongoing requests
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = handlers.ApplyStickySession(cliCtx, h.Cfg, rawJSON)
 
 	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "")
 	setSSEHeaders := func() {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -90,6 +91,33 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
+}
+
+// ApplyStickySession injects sticky session pinning into the context based on the request body.
+// If a conversation is already pinned to an auth, WithPinnedAuthID is set.
+// Otherwise, a callback is set to capture the selected auth on first use.
+// Returns the modified context. No-op if sticky sessions are disabled in config.
+func ApplyStickySession(ctx context.Context, cfg *config.SDKConfig, rawJSON []byte) context.Context {
+	if cfg == nil || !cfg.StickySession.Enabled {
+		return ctx
+	}
+
+	convKey := cache.ConversationKey(rawJSON)
+	if convKey == "" {
+		return ctx
+	}
+
+	ttl := time.Duration(cfg.StickySession.TTLMinutes) * time.Minute
+	store := cache.GetStickySessionStore(ttl)
+
+	if pinnedAuth := store.Lookup(convKey); pinnedAuth != "" {
+		store.Set(convKey, pinnedAuth)
+		return WithPinnedAuthID(ctx, pinnedAuth)
+	}
+
+	return WithSelectedAuthIDCallback(ctx, func(authID string) {
+		store.Set(convKey, authID)
+	})
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
