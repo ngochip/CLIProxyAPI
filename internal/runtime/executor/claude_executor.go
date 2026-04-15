@@ -514,8 +514,8 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			if errText == "" {
 				errText = "prompt is too long"
 			}
-		errText += "\n<summarize></summarize>"
-		out := make(chan cliproxyexecutor.StreamChunk, 4)
+			errText += "\n<summarize></summarize>"
+			out := make(chan cliproxyexecutor.StreamChunk, 4)
 			go func() {
 				defer close(out)
 				sseLines := buildSyntheticClaudeStreamLines(baseModel, errText)
@@ -2136,17 +2136,20 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 // This enables up to 90% cost reduction on cached tokens (cache read = 0.1x base price).
 // See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 func ensureCacheControl(payload []byte) []byte {
-	// 1. Inject cache_control into the LAST tool (caches all tool definitions)
-	// Tools are cached first in the hierarchy, so this is the most important breakpoint.
+	// 1. Inject cache_control with 1h TTL into the LAST tool
 	payload = injectToolsCacheControl(payload)
 
-	// 2. Inject cache_control into the LAST system prompt element
-	// System is the second level in the cache hierarchy.
+	// 2. Inject cache_control with 1h TTL into the LAST system prompt element
 	payload = injectSystemCacheControl(payload)
 
 	// 3. Inject cache_control into messages for multi-turn conversation caching
-	// This caches the conversation history up to the second-to-last user turn.
 	payload = injectMessagesCacheControl(payload)
+
+	// 4. Add top-level cache_control for automatic caching (Anthropic auto-advances
+	// the breakpoint to the last cacheable block as conversation grows)
+	if !gjson.GetBytes(payload, "cache_control").Exists() {
+		payload, _ = sjson.SetBytes(payload, "cache_control", map[string]string{"type": "ephemeral"})
+	}
 
 	return payload
 }
@@ -2572,9 +2575,9 @@ func injectToolsCacheControl(payload []byte) []byte {
 		return payload
 	}
 
-	// Add cache_control to the last tool
+	// Add cache_control with 1h TTL to the last tool (tools rarely change within a session)
 	lastToolPath := fmt.Sprintf("tools.%d.cache_control", toolCount-1)
-	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral"})
+	result, err := sjson.SetBytes(payload, lastToolPath, map[string]string{"type": "ephemeral", "ttl": "1h"})
 	if err != nil {
 		log.Warnf("failed to inject cache_control into tools array: %v", err)
 		return payload
@@ -2611,17 +2614,15 @@ func injectSystemCacheControl(payload []byte) []byte {
 			return payload
 		}
 
-		// Add cache_control to the last system element
+		// Add cache_control with 1h TTL to the last system element (system prompt rarely changes)
 		lastSystemPath := fmt.Sprintf("system.%d.cache_control", count-1)
-		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral"})
+		result, err := sjson.SetBytes(payload, lastSystemPath, map[string]string{"type": "ephemeral", "ttl": "1h"})
 		if err != nil {
 			log.Warnf("failed to inject cache_control into system array: %v", err)
 			return payload
 		}
 		payload = result
 	} else if system.Type == gjson.String {
-		// Convert string system prompt to array with cache_control
-		// "system": "text" -> "system": [{"type": "text", "text": "text", "cache_control": {"type": "ephemeral"}}]
 		text := system.String()
 		newSystem := []map[string]interface{}{
 			{
@@ -2629,6 +2630,7 @@ func injectSystemCacheControl(payload []byte) []byte {
 				"text": text,
 				"cache_control": map[string]string{
 					"type": "ephemeral",
+					"ttl":  "1h",
 				},
 			},
 		}

@@ -17,6 +17,10 @@ func TestEnsureCacheControl(t *testing.T) {
 		if res.String() != "ephemeral" {
 			t.Errorf("cache_control not found in system string. Output: %s", string(output))
 		}
+		ttl := gjson.GetBytes(output, "system.0.cache_control.ttl")
+		if ttl.String() != "1h" {
+			t.Errorf("system cache_control should have ttl=1h, got %q", ttl.String())
+		}
 	})
 
 	// Test case 2: System prompt as array
@@ -24,7 +28,6 @@ func TestEnsureCacheControl(t *testing.T) {
 		input := []byte(`{"model": "claude-3-5-sonnet", "system": [{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}], "messages": []}`)
 		output := ensureCacheControl(input)
 
-		// cache_control should only be on the LAST element
 		res0 := gjson.GetBytes(output, "system.0.cache_control")
 		res1 := gjson.GetBytes(output, "system.1.cache_control.type")
 
@@ -34,9 +37,13 @@ func TestEnsureCacheControl(t *testing.T) {
 		if res1.String() != "ephemeral" {
 			t.Errorf("cache_control not found on last system element. Output: %s", string(output))
 		}
+		ttl := gjson.GetBytes(output, "system.1.cache_control.ttl")
+		if ttl.String() != "1h" {
+			t.Errorf("system cache_control should have ttl=1h, got %q", ttl.String())
+		}
 	})
 
-	// Test case 3: Tools are cached
+	// Test case 3: Tools are cached with 1h TTL
 	t.Run("Tools Caching", func(t *testing.T) {
 		input := []byte(`{
 			"model": "claude-3-5-sonnet",
@@ -49,7 +56,6 @@ func TestEnsureCacheControl(t *testing.T) {
 		}`)
 		output := ensureCacheControl(input)
 
-		// cache_control should only be on the LAST tool
 		tool0Cache := gjson.GetBytes(output, "tools.0.cache_control")
 		tool1Cache := gjson.GetBytes(output, "tools.1.cache_control.type")
 
@@ -59,8 +65,11 @@ func TestEnsureCacheControl(t *testing.T) {
 		if tool1Cache.String() != "ephemeral" {
 			t.Errorf("cache_control not found on last tool. Output: %s", string(output))
 		}
+		toolTTL := gjson.GetBytes(output, "tools.1.cache_control.ttl")
+		if toolTTL.String() != "1h" {
+			t.Errorf("tool cache_control should have ttl=1h, got %q", toolTTL.String())
+		}
 
-		// System should also have cache_control
 		systemCache := gjson.GetBytes(output, "system.0.cache_control.type")
 		if systemCache.String() != "ephemeral" {
 			t.Errorf("cache_control not found in system. Output: %s", string(output))
@@ -68,7 +77,6 @@ func TestEnsureCacheControl(t *testing.T) {
 	})
 
 	// Test case 4: Tools and system are INDEPENDENT breakpoints
-	// Per Anthropic docs: Up to 4 breakpoints allowed, tools and system are cached separately
 	t.Run("Independent Cache Breakpoints", func(t *testing.T) {
 		input := []byte(`{
 			"model": "claude-3-5-sonnet",
@@ -80,14 +88,11 @@ func TestEnsureCacheControl(t *testing.T) {
 		}`)
 		output := ensureCacheControl(input)
 
-		// Tool already has cache_control - should not be changed
 		tool0Cache := gjson.GetBytes(output, "tools.0.cache_control.type")
 		if tool0Cache.String() != "ephemeral" {
 			t.Errorf("existing cache_control was incorrectly removed")
 		}
 
-		// System SHOULD get cache_control because it is an INDEPENDENT breakpoint
-		// Tools and system are separate cache levels in the hierarchy
 		systemCache := gjson.GetBytes(output, "system.0.cache_control.type")
 		if systemCache.String() != "ephemeral" {
 			t.Errorf("system should have its own cache_control breakpoint (independent of tools)")
@@ -109,11 +114,14 @@ func TestEnsureCacheControl(t *testing.T) {
 		if toolCache.String() != "ephemeral" {
 			t.Errorf("cache_control not found on tool. Output: %s", string(output))
 		}
+		toolTTL := gjson.GetBytes(output, "tools.0.cache_control.ttl")
+		if toolTTL.String() != "1h" {
+			t.Errorf("tool cache_control should have ttl=1h, got %q", toolTTL.String())
+		}
 	})
 
 	// Test case 6: Many tools (Claude Code scenario)
 	t.Run("Many Tools (Claude Code Scenario)", func(t *testing.T) {
-		// Simulate Claude Code with many tools
 		toolsJSON := `[`
 		for i := 0; i < 50; i++ {
 			if i > 0 {
@@ -132,7 +140,6 @@ func TestEnsureCacheControl(t *testing.T) {
 
 		output := ensureCacheControl(input)
 
-		// Only the last tool (index 49) should have cache_control
 		for i := 0; i < 49; i++ {
 			path := fmt.Sprintf("tools.%d.cache_control", i)
 			if gjson.GetBytes(output, path).Exists() {
@@ -145,13 +152,10 @@ func TestEnsureCacheControl(t *testing.T) {
 			t.Errorf("last tool (49) should have cache_control")
 		}
 
-		// System should also have cache_control
 		systemCache := gjson.GetBytes(output, "system.0.cache_control.type")
 		if systemCache.String() != "ephemeral" {
 			t.Errorf("system should have cache_control")
 		}
-
-		t.Log("test passed: 50 tools - cache_control only on last tool")
 	})
 
 	// Test case 7: Empty tools array
@@ -159,7 +163,6 @@ func TestEnsureCacheControl(t *testing.T) {
 		input := []byte(`{"model": "claude-3-5-sonnet", "tools": [], "system": "Test", "messages": []}`)
 		output := ensureCacheControl(input)
 
-		// System should still get cache_control
 		systemCache := gjson.GetBytes(output, "system.0.cache_control.type")
 		if systemCache.String() != "ephemeral" {
 			t.Errorf("system should have cache_control even with empty tools array")
@@ -213,6 +216,17 @@ func TestEnsureCacheControl(t *testing.T) {
 			t.Errorf("existing cache_control should be preserved. Output: %s", string(output))
 		}
 	})
+
+	// Test case 10: Top-level cache_control is added for automatic caching
+	t.Run("Top Level Cache Control", func(t *testing.T) {
+		input := []byte(`{"model": "claude-3-5-sonnet", "system": "Test", "messages": []}`)
+		output := ensureCacheControl(input)
+
+		topLevel := gjson.GetBytes(output, "cache_control.type")
+		if topLevel.String() != "ephemeral" {
+			t.Errorf("top-level cache_control should be added. Output: %s", string(output))
+		}
+	})
 }
 
 // TestCacheControlOrder verifies the correct order: tools -> system -> messages
@@ -234,9 +248,12 @@ func TestCacheControlOrder(t *testing.T) {
 
 	output := ensureCacheControl(input)
 
-	// 1. Last tool has cache_control
+	// 1. Last tool has cache_control with 1h TTL
 	if gjson.GetBytes(output, "tools.1.cache_control.type").String() != "ephemeral" {
 		t.Error("last tool should have cache_control")
+	}
+	if gjson.GetBytes(output, "tools.1.cache_control.ttl").String() != "1h" {
+		t.Error("last tool cache_control should have ttl=1h")
 	}
 
 	// 2. First tool has NO cache_control
@@ -244,9 +261,12 @@ func TestCacheControlOrder(t *testing.T) {
 		t.Error("first tool should NOT have cache_control")
 	}
 
-	// 3. Last system element has cache_control
+	// 3. Last system element has cache_control with 1h TTL
 	if gjson.GetBytes(output, "system.1.cache_control.type").String() != "ephemeral" {
 		t.Error("last system element should have cache_control")
+	}
+	if gjson.GetBytes(output, "system.1.cache_control.ttl").String() != "1h" {
+		t.Error("last system cache_control should have ttl=1h")
 	}
 
 	// 4. First system element has NO cache_control
@@ -254,5 +274,8 @@ func TestCacheControlOrder(t *testing.T) {
 		t.Error("first system element should NOT have cache_control")
 	}
 
-	t.Log("cache order correct: tools -> system")
+	// 5. Top-level cache_control for automatic caching
+	if gjson.GetBytes(output, "cache_control.type").String() != "ephemeral" {
+		t.Error("top-level cache_control should be present")
+	}
 }

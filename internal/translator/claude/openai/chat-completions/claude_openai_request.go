@@ -392,19 +392,19 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 					}
 				} else if contentResult.Exists() && contentResult.IsArray() {
 					contentResult.ForEach(func(_, part gjson.Result) bool {
-					partType := part.Get("type").String()
+						partType := part.Get("type").String()
 
-					switch partType {
-					case "text":
-						parts := extractThinkingFromContent(part.Get("text").String())
-						for _, p := range parts {
+						switch partType {
+						case "text":
+							parts := extractThinkingFromContent(part.Get("text").String())
+							for _, p := range parts {
 								msg, _ = sjson.SetBytes(msg, "content.-1", p)
-						}
-					default:
-						claudePart := convertOpenAIContentPartToClaudePart(part)
-						if claudePart != "" {
-							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(claudePart))
-						}
+							}
+						default:
+							claudePart := convertOpenAIContentPartToClaudePart(part)
+							if claudePart != "" {
+								msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(claudePart))
+							}
 						}
 						return true
 					})
@@ -553,9 +553,14 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// with a thinking block (preceeding the lastmost set of tool_use and tool_result blocks)"
 	out = []byte(ensureAssistantThinkingBlock(string(out)))
 
-	// Apply cache_control markers để tối ưu prompt caching
-	// Anthropic cho phép tối đa 4 breakpoints, đặt ở cuối các phần ổn định
+	// Apply explicit cache_control breakpoints (tools 1h, system 1h, second-to-last user 5m)
 	out = []byte(applyCacheControlMarkers(string(out)))
+
+	// Add top-level cache_control for automatic caching: Anthropic auto-applies
+	// a breakpoint to the last cacheable block and advances it as conversation grows.
+	if !gjson.GetBytes(out, "cache_control").Exists() {
+		out, _ = sjson.SetBytes(out, "cache_control", map[string]string{"type": "ephemeral"})
+	}
 
 	return out
 }

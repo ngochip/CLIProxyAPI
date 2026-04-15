@@ -14,62 +14,54 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// applyCacheControlMarkers thêm cache_control markers vào request để tối ưu prompt caching
-// Anthropic prompt caching cho phép tối đa 4 breakpoints
+// applyCacheControlMarkers adds cache_control markers to optimize prompt caching.
+// Anthropic allows up to 4 breakpoints per request.
 //
-// QUAN TRỌNG: Thứ tự hierarchy của Claude API là: tools → system → messages
-// Cache prefixes được tạo theo thứ tự này, nên ta đặt breakpoints theo đúng thứ tự
+// Evaluation order: tools -> system -> messages.
 //
-// Chiến lược đặt breakpoints:
-// 1. Tools array (cuối cùng) - thường không thay đổi giữa các requests
-// 2. System instructions (cuối cùng) - ổn định nhất, ít thay đổi
-// 3. Messages đầu tiên (user message đầu) - conversation history ổn định
-// 4. Messages cuối (user message cuối cùng) - context gần nhất
+// Strategy (3 explicit breakpoints + 1 automatic):
+//  1. Tools (last) with TTL 1h - rarely change within a session
+//  2. System (last valid block) with TTL 1h - most stable content
+//  3. Second-to-last user message with default 5m TTL - enables
+//     multi-turn cache reuse (per Anthropic docs)
 //
-// Lưu ý:
-// - Thinking blocks không thể được cache trực tiếp với cache_control
-// - Empty text blocks không thể cached
-// - Minimum cacheable tokens: 1024 (Sonnet/Opus 4), 2048 (Haiku 3), 4096 (Opus 4.5/Haiku 4.5)
-// - Cache TTL mặc định: 5 phút, tự động refresh mỗi lần sử dụng
-// - Cache write cost: 125% base input token price
-// - Cache read cost: 10% base input token price
+// A top-level cache_control (automatic caching) is added separately
+// in the caller so Anthropic auto-advances the breakpoint as the
+// conversation grows, using the remaining slot.
+//
+// TTL ordering constraint: 1h blocks MUST precede 5m blocks in
+// evaluation order. Since tools and system precede messages, this
+// is naturally satisfied.
 func applyCacheControlMarkers(requestJSON string) string {
-	cacheControl := map[string]string{"type": "ephemeral"}
+	cacheControl1h := map[string]string{"type": "ephemeral", "ttl": "1h"}
+	cacheControl5m := map[string]string{"type": "ephemeral"}
 	breakpointsUsed := 0
-	const maxBreakpoints = 4
+	const maxBreakpoints = 3 // reserve 1 slot for top-level automatic caching
 
-	// Breakpoint 1: Tools array (cuối cùng)
-	// Tools declaration thường không thay đổi trong một session
-	// Đặt trước system vì theo hierarchy: tools → system → messages
+	// Breakpoint 1: last tool with 1h TTL
 	toolsResult := gjson.Get(requestJSON, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() {
 		toolsArray := toolsResult.Array()
 		if len(toolsArray) > 0 && breakpointsUsed < maxBreakpoints {
 			lastIdx := len(toolsArray) - 1
 			path := fmt.Sprintf("tools.%d.cache_control", lastIdx)
-			requestJSON, _ = sjson.Set(requestJSON, path, cacheControl)
+			requestJSON, _ = sjson.Set(requestJSON, path, cacheControl1h)
 			breakpointsUsed++
 		}
 	}
 
-	// Breakpoint 2: System instructions (cuối cùng)
-	// System thường là phần ổn định nhất, ít thay đổi giữa các requests
-	// Hỗ trợ cả array format và string format
+	// Breakpoint 2: last valid system block with 1h TTL
 	systemResult := gjson.Get(requestJSON, "system")
 	if systemResult.Exists() && breakpointsUsed < maxBreakpoints {
 		if systemResult.IsArray() {
-			// System là array of content blocks
 			systemArray := systemResult.Array()
 			if len(systemArray) > 0 {
-				// Tìm content block cuối có nội dung (skip empty blocks)
 				lastValidIdx := -1
 				for i := len(systemArray) - 1; i >= 0; i-- {
 					blockType := systemArray[i].Get("type").String()
-					// Skip thinking blocks (không thể cache trực tiếp)
 					if blockType == "thinking" || blockType == "redacted_thinking" {
 						continue
 					}
-					// Check có nội dung không
 					if blockType == "text" && systemArray[i].Get("text").String() == "" {
 						continue
 					}
@@ -78,18 +70,17 @@ func applyCacheControlMarkers(requestJSON string) string {
 				}
 				if lastValidIdx >= 0 {
 					path := fmt.Sprintf("system.%d.cache_control", lastValidIdx)
-					requestJSON, _ = sjson.Set(requestJSON, path, cacheControl)
+					requestJSON, _ = sjson.Set(requestJSON, path, cacheControl1h)
 					breakpointsUsed++
 				}
 			}
 		} else if systemResult.Type == gjson.String && systemResult.String() != "" {
-			// System là string đơn giản - convert sang array format để cache được
 			systemText := systemResult.String()
 			systemArray := []map[string]interface{}{
 				{
 					"type":          "text",
 					"text":          systemText,
-					"cache_control": cacheControl,
+					"cache_control": cacheControl1h,
 				},
 			}
 			requestJSON, _ = sjson.Set(requestJSON, "system", systemArray)
@@ -97,63 +88,30 @@ func applyCacheControlMarkers(requestJSON string) string {
 		}
 	}
 
-	// Breakpoint 3 & 4: Messages
-	// Đặt cache_control ở các vị trí chiến lược trong message history
+	// Breakpoint 3: second-to-last user message with 5m TTL
+	// Per Anthropic docs: caching the second-to-last user turn lets the
+	// model reuse the earlier cache on subsequent turns.
 	messagesResult := gjson.Get(requestJSON, "messages")
 	if messagesResult.Exists() && messagesResult.IsArray() {
 		messages := messagesResult.Array()
 		if len(messages) > 0 && breakpointsUsed < maxBreakpoints {
-			// Tìm các vị trí tốt để đặt breakpoint trong messages
-			// Ưu tiên: user messages với content dài hoặc ở vị trí chiến lược
-
-			// Chiến lược: đặt breakpoint ở user message cuối cùng
-			// Điều này giúp cache phần lớn conversation history
-			lastUserMsgIdx := -1
-			for i := len(messages) - 1; i >= 0; i-- {
-				role := messages[i].Get("role").String()
-				if role == "user" {
-					lastUserMsgIdx = i
-					break
+			var userMsgIndices []int
+			for i, msg := range messages {
+				if msg.Get("role").String() == "user" {
+					userMsgIndices = append(userMsgIndices, i)
 				}
 			}
 
-			if lastUserMsgIdx >= 0 && breakpointsUsed < maxBreakpoints {
-				// Đặt cache_control ở content block cuối của user message
-				// Skip thinking blocks và empty blocks
-				content := messages[lastUserMsgIdx].Get("content")
+			if len(userMsgIndices) >= 2 {
+				secondToLastIdx := userMsgIndices[len(userMsgIndices)-2]
+				content := messages[secondToLastIdx].Get("content")
 				if content.IsArray() {
 					contentArray := content.Array()
 					lastValidIdx := findLastCacheableContentIdx(contentArray)
 					if lastValidIdx >= 0 {
-						path := fmt.Sprintf("messages.%d.content.%d.cache_control", lastUserMsgIdx, lastValidIdx)
-						requestJSON, _ = sjson.Set(requestJSON, path, cacheControl)
+						path := fmt.Sprintf("messages.%d.content.%d.cache_control", secondToLastIdx, lastValidIdx)
+						requestJSON, _ = sjson.Set(requestJSON, path, cacheControl5m)
 						breakpointsUsed++
-					}
-				}
-			}
-
-			// Nếu còn breakpoint, đặt thêm ở user message đầu tiên (nếu khác với message cuối)
-			// Điều này giúp cache system context và initial user prompt
-			if breakpointsUsed < maxBreakpoints && len(messages) > 2 {
-				firstUserMsgIdx := -1
-				for i := 0; i < len(messages); i++ {
-					role := messages[i].Get("role").String()
-					if role == "user" {
-						firstUserMsgIdx = i
-						break
-					}
-				}
-
-				if firstUserMsgIdx >= 0 && firstUserMsgIdx != lastUserMsgIdx {
-					content := messages[firstUserMsgIdx].Get("content")
-					if content.IsArray() {
-						contentArray := content.Array()
-						lastValidIdx := findLastCacheableContentIdx(contentArray)
-						if lastValidIdx >= 0 {
-							path := fmt.Sprintf("messages.%d.content.%d.cache_control", firstUserMsgIdx, lastValidIdx)
-							requestJSON, _ = sjson.Set(requestJSON, path, cacheControl)
-							breakpointsUsed++
-						}
 					}
 				}
 			}
