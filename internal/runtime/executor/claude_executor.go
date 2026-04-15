@@ -1939,13 +1939,14 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 }
 
 // sanitizeForwardedSystemPrompt strips third-party identity markers from
-// forwarded system prompts while preserving functional content (MCP descriptors,
-// tool instructions, rules, skills, file paths, etc.).
+// forwarded system prompts to prevent Anthropic from detecting non-Claude-Code
+// clients.
 //
-// Three stages:
+// Four stages:
 //  1. Remove paragraphs whose trimmed text starts with a known identity prefix
 //  2. Remove paragraphs containing a known third-party anchor URL
-//  3. Apply targeted inline text replacements for branded phrases
+//  3. Apply targeted inline text replacements for specific branded phrases
+//  4. Scrub all remaining brand keywords (case-insensitive) with generic terms
 func sanitizeForwardedSystemPrompt(text string) string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
@@ -1987,6 +1988,9 @@ func sanitizeForwardedSystemPrompt(text string) string {
 	for _, r := range helps.ThirdPartyTextReplacements {
 		result = strings.ReplaceAll(result, r.Match, r.Replacement)
 	}
+
+	// Stage 4: Scrub all remaining brand keywords
+	result = helps.ScrubBrandKeywords(result)
 
 	return strings.TrimSpace(result)
 }

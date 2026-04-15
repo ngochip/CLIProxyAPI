@@ -1,10 +1,15 @@
 package helps
 
+import (
+	"regexp"
+	"strings"
+)
+
 // ThirdPartyIdentityPrefixes lists identity preamble prefixes used by known
 // third-party clients. Any paragraph whose trimmed text starts with one of
 // these is removed during OAuth prompt sanitization (Stage 1).
 var ThirdPartyIdentityPrefixes = []string{
-	"You are a personal assistant operating inside OpenClaw",
+	"You are a personal assistant operating inside",
 	"You are OpenCode",
 	"You are Cline",
 	"You are Roo Code",
@@ -37,21 +42,48 @@ var ThirdPartyAnchorURLs = []string{
 }
 
 // ThirdPartyTextReplacement is a single find-and-replace rule applied to
-// remaining text after paragraph removal (Stage 3). Only specific branded
-// phrases are targeted — file paths and tool names are left intact.
+// remaining text after paragraph removal (Stage 3).
 type ThirdPartyTextReplacement struct {
 	Match       string
 	Replacement string
 }
 
 // ThirdPartyTextReplacements lists inline text replacements applied after
-// paragraph filtering. These target agent-role brand mentions without
-// affecting file paths like ~/.openclaw/workspace/.
+// paragraph filtering (Stage 3).
 var ThirdPartyTextReplacements = []ThirdPartyTextReplacement{
-	{"operating inside OpenClaw", "operating as the assistant"},
-	{"OpenClaw Agent Framework", "Agent Framework"},
-	{"OpenClaw CLI Quick Reference", "CLI Quick Reference"},
-	{"OpenClaw docs:", "Docs:"},
-	{"OpenClaw behavior, commands, config", "agent behavior, commands, config"},
 	{"if OpenCode honestly", "if the assistant honestly"},
+}
+
+// ThirdPartyBrandKeyword maps a case-insensitive brand keyword to its
+// generic replacement. Used in Stage 4 to scrub all remaining occurrences
+// including those embedded in file paths, tool names, and env vars.
+type ThirdPartyBrandKeyword struct {
+	Pattern     *regexp.Regexp
+	Replacement string
+}
+
+// ThirdPartyBrandKeywords lists brand keywords to scrub (Stage 4).
+// Order matters: longer/more-specific patterns first to avoid partial matches.
+var ThirdPartyBrandKeywords = []ThirdPartyBrandKeyword{
+	// OpenClaw ecosystem
+	{regexp.MustCompile(`(?i)lossless-claw`), "lossless-recall"},
+	{regexp.MustCompile(`(?i)clawflow`), "taskflow"},
+	{regexp.MustCompile(`(?i)clawhub`), "skillhub"},
+	{regexp.MustCompile(`(?i)OPENCLAW_CACHE_BOUNDARY`), "AGENT_CACHE_BOUNDARY"},
+	{regexp.MustCompile(`(?i)openclaw`), "agent"},
+	{regexp.MustCompile(`(?i)mcporter`), "mcp-cli"},
+	{regexp.MustCompile(`(?i)clawd`), "agent-d"},
+	// OpenCode ecosystem
+	{regexp.MustCompile(`(?i)opencode`), "agent"},
+}
+
+// ScrubBrandKeywords replaces all brand keyword occurrences in text (Stage 4).
+func ScrubBrandKeywords(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return text
+	}
+	for _, kw := range ThirdPartyBrandKeywords {
+		text = kw.Pattern.ReplaceAllString(text, kw.Replacement)
+	}
+	return text
 }
