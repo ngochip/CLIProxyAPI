@@ -312,9 +312,13 @@ func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flus
 		KeepAliveInterval: keepAliveInterval,
 		WriteChunk: func(chunk []byte) {
 			if alt == "" {
-				_, _ = c.Writer.Write([]byte("data: "))
-				_, _ = c.Writer.Write(chunk)
-				_, _ = c.Writer.Write([]byte("\n\n"))
+				prefix := []byte("data: ")
+				suffix := []byte("\n\n")
+				buf := make([]byte, 0, len(prefix)+len(chunk)+len(suffix))
+				buf = append(buf, prefix...)
+				buf = append(buf, chunk...)
+				buf = append(buf, suffix...)
+				_, _ = c.Writer.Write(buf)
 			} else {
 				_, _ = c.Writer.Write(chunk)
 			}

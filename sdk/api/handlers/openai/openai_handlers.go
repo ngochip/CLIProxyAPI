@@ -516,9 +516,11 @@ func (h *OpenAIAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byt
 			setSSEHeaders()
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
-			_, _ = c.Writer.Write(sseDataPrefix)
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write(sseNewlines)
+			buf := make([]byte, 0, len(sseDataPrefix)+len(chunk)+len(sseNewlines))
+			buf = append(buf, sseDataPrefix...)
+			buf = append(buf, chunk...)
+			buf = append(buf, sseNewlines...)
+			_, _ = c.Writer.Write(buf)
 			flusher.Flush()
 
 			// Continue streaming the rest
@@ -628,9 +630,11 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			// Write the first chunk
 			converted := convertChatCompletionsStreamChunkToCompletions(chunk)
 			if converted != nil {
-				_, _ = c.Writer.Write(sseDataPrefix)
-				_, _ = c.Writer.Write(converted)
-				_, _ = c.Writer.Write(sseNewlines)
+				buf := make([]byte, 0, len(sseDataPrefix)+len(converted)+len(sseNewlines))
+				buf = append(buf, sseDataPrefix...)
+				buf = append(buf, converted...)
+				buf = append(buf, sseNewlines...)
+				_, _ = c.Writer.Write(buf)
 				flusher.Flush()
 			}
 
@@ -673,9 +677,11 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 func (h *OpenAIAPIHandler) handleStreamResult(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			_, _ = c.Writer.Write(sseDataPrefix)
-			_, _ = c.Writer.Write(chunk)
-			_, _ = c.Writer.Write(sseNewlines)
+			buf := make([]byte, 0, len(sseDataPrefix)+len(chunk)+len(sseNewlines))
+			buf = append(buf, sseDataPrefix...)
+			buf = append(buf, chunk...)
+			buf = append(buf, sseNewlines...)
+			_, _ = c.Writer.Write(buf)
 		},
 		WriteTerminalError: func(errMsg *interfaces.ErrorMessage) {
 			if errMsg == nil {
