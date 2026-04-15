@@ -78,6 +78,26 @@ var oauthToolRenameReverseMap = func() map[string]string {
 // even after remapping. Currently empty — all tools are mapped instead of removed.
 var oauthToolsToRemove = map[string]bool{}
 
+// oauthToolToPascal converts a snake_case tool name to PascalCase for mcp_ prefixing.
+// e.g. "agents_list" -> "AgentsList", "lcm_grep" -> "LcmGrep"
+func oauthToolToPascal(name string) string {
+	parts := strings.Split(name, "_")
+	var b strings.Builder
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		b.WriteString(strings.ToUpper(p[:1]))
+		if len(p) > 1 {
+			b.WriteString(p[1:])
+		}
+	}
+	if b.Len() == 0 {
+		return name
+	}
+	return b.String()
+}
+
 // Anthropic-compatible upstreams may reject or even crash when Claude models
 // omit max_tokens. Prefer registered model metadata before using a fallback.
 const defaultModelMaxTokens = 1024
@@ -1383,6 +1403,15 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 					toolJSON = updatedTool
 					renamed = true
 				}
+			} else if !strings.HasPrefix(name, "mcp_") && oauthToolRenameMap[name] == "" {
+				// Unknown tool not in rename map: add mcp_ prefix so Anthropic
+				// treats it as a Claude Code MCP tool (avoids 10-tool threshold).
+				mcpName := "mcp_" + oauthToolToPascal(name)
+				updatedTool, err := sjson.Set(toolJSON, "name", mcpName)
+				if err == nil {
+					toolJSON = updatedTool
+					renamed = true
+				}
 			}
 
 			if toolCount > 0 {
@@ -1401,11 +1430,12 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 	if toolChoiceType == "tool" {
 		tcName := gjson.GetBytes(body, "tool_choice.name").String()
 		if oauthToolsToRemove[tcName] {
-			// The chosen tool was removed from the tools array, so drop tool_choice to
-			// keep the payload internally consistent and fall back to normal auto tool use.
 			body, _ = sjson.DeleteBytes(body, "tool_choice")
 		} else if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
+			renamed = true
+		} else if !strings.HasPrefix(tcName, "mcp_") && oauthToolRenameMap[tcName] == "" {
+			body, _ = sjson.SetBytes(body, "tool_choice.name", "mcp_"+oauthToolToPascal(tcName))
 			renamed = true
 		}
 	}
@@ -1427,12 +1457,20 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
 						renamed = true
+					} else if !strings.HasPrefix(name, "mcp_") && oauthToolRenameMap[name] == "" {
+						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, "mcp_"+oauthToolToPascal(name))
+						renamed = true
 					}
 				case "tool_reference":
 					toolName := part.Get("tool_name").String()
 					if newName, ok := oauthToolRenameMap[toolName]; ok && newName != toolName {
 						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
+						renamed = true
+					} else if !strings.HasPrefix(toolName, "mcp_") && oauthToolRenameMap[toolName] == "" {
+						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
+						body, _ = sjson.SetBytes(body, path, "mcp_"+oauthToolToPascal(toolName))
 						renamed = true
 					}
 				case "tool_result":
@@ -1444,9 +1482,12 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 						nestedContent.ForEach(func(nestedIndex, nestedPart gjson.Result) bool {
 							if nestedPart.Get("type").String() == "tool_reference" {
 								nestedToolName := nestedPart.Get("tool_name").String()
+								nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 								if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
-									nestedPath := fmt.Sprintf("messages.%d.content.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int(), nestedIndex.Int())
 									body, _ = sjson.SetBytes(body, nestedPath, newName)
+									renamed = true
+								} else if !strings.HasPrefix(nestedToolName, "mcp_") && oauthToolRenameMap[nestedToolName] == "" {
+									body, _ = sjson.SetBytes(body, nestedPath, "mcp_"+oauthToolToPascal(nestedToolName))
 									renamed = true
 								}
 							}
@@ -1479,17 +1520,52 @@ func reverseRemapOAuthToolNames(body []byte) []byte {
 			if origName, ok := oauthToolRenameReverseMap[name]; ok {
 				path := fmt.Sprintf("content.%d.name", index.Int())
 				body, _ = sjson.SetBytes(body, path, origName)
+			} else if stripped := reverseMcpPrefix(name); stripped != "" {
+				path := fmt.Sprintf("content.%d.name", index.Int())
+				body, _ = sjson.SetBytes(body, path, stripped)
 			}
 		case "tool_reference":
 			toolName := part.Get("tool_name").String()
 			if origName, ok := oauthToolRenameReverseMap[toolName]; ok {
 				path := fmt.Sprintf("content.%d.tool_name", index.Int())
 				body, _ = sjson.SetBytes(body, path, origName)
+			} else if stripped := reverseMcpPrefix(toolName); stripped != "" {
+				path := fmt.Sprintf("content.%d.tool_name", index.Int())
+				body, _ = sjson.SetBytes(body, path, stripped)
 			}
 		}
 		return true
 	})
 	return body
+}
+
+// reverseMcpPrefix strips the mcp_ prefix and converts PascalCase back to snake_case.
+// Returns empty string if the name doesn't have mcp_ prefix.
+// e.g. "mcp_AgentsList" -> "agents_list", "mcp_LcmGrep" -> "lcm_grep"
+func reverseMcpPrefix(name string) string {
+	if !strings.HasPrefix(name, "mcp_") {
+		return ""
+	}
+	pascal := name[4:]
+	if pascal == "" {
+		return ""
+	}
+	// Don't reverse-map names that are in the static rename map values
+	if _, isStatic := oauthToolRenameReverseMap[name]; isStatic {
+		return ""
+	}
+	var b strings.Builder
+	for i, r := range pascal {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				b.WriteByte('_')
+			}
+			b.WriteRune(r + ('a' - 'A'))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // reverseRemapOAuthToolNamesFromStreamLine reverses the tool name mapping for SSE stream lines.
@@ -1516,6 +1592,11 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte) []byte {
 			if err != nil {
 				return line
 			}
+		} else if stripped := reverseMcpPrefix(name); stripped != "" {
+			updated, err = sjson.SetBytes(payload, "content_block.name", stripped)
+			if err != nil {
+				return line
+			}
 		} else {
 			return line
 		}
@@ -1523,6 +1604,11 @@ func reverseRemapOAuthToolNamesFromStreamLine(line []byte) []byte {
 		toolName := contentBlock.Get("tool_name").String()
 		if origName, ok := oauthToolRenameReverseMap[toolName]; ok {
 			updated, err = sjson.SetBytes(payload, "content_block.tool_name", origName)
+			if err != nil {
+				return line
+			}
+		} else if stripped := reverseMcpPrefix(toolName); stripped != "" {
+			updated, err = sjson.SetBytes(payload, "content_block.tool_name", stripped)
 			if err != nil {
 				return line
 			}
