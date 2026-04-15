@@ -116,11 +116,12 @@ if (regionStart === -1) {
 const regionEnd = Math.min(data.length, regionStart + 1500);
 const region = data.substring(regionStart, regionEnd);
 
-// Auto-detect: <varName>=new <ClassName>({modelName:<sourceVar>.modelConfig?.modelName})
+// Auto-detect: <varName>=new <ClassName>({modelName:<sourceVar>.modelConfig?.modelName[,maxMode:!0|!1]})
 // Cursor 2.6.x: f=new Zf({modelName:u.modelConfig?.modelName})
 // Cursor 3.0+:  g=new Qg({modelName:l.modelConfig?.modelName})
+// Cursor 3.2+:  f=new ng({modelName:l.modelConfig?.modelName,maxMode:!1})
 // Dùng [\w$] vì minified identifier có thể chứa $ (vd: $l, $e)
-const modelDetailsRegex = /([\w$])=new ([\w$]+)\(\{modelName:([\w$]+)\.modelConfig\?\.modelName\}\)/;
+const modelDetailsRegex = /([\w$])=new ([\w$]+)\(\{modelName:([\w$]+)\.modelConfig\?\.modelName(,maxMode:![01])?\}\)/;
 const regionMatch = region.match(modelDetailsRegex);
 
 if (!regionMatch) {
@@ -139,8 +140,10 @@ if (!regionMatch) {
 const RESULT_VAR = regionMatch[1];
 const MODEL_DETAILS_CLASS = regionMatch[2];
 const SOURCE_VAR = regionMatch[3];
-const ORIGINAL = `${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}.modelConfig?.modelName})`;
-console.log(`   ModelDetails class: ${MODEL_DETAILS_CLASS} (${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}...}))`);
+const MAX_MODE_SUFFIX = regionMatch[4] || '';
+const ORIGINAL = `${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}.modelConfig?.modelName${MAX_MODE_SUFFIX}})`;
+console.log(`   ModelDetails class: ${MODEL_DETAILS_CLASS} (${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}...${MAX_MODE_SUFFIX}}))`);
+console.log(`   Detected pattern: ${ORIGINAL}`);
 
 // Verify uniqueness: pattern phải xuất hiện đúng 1 lần trong TOÀN BỘ file
 let count = 0;
@@ -190,7 +193,7 @@ if (!fs.existsSync(PRODUCT_BACKUP)) {
  * NOTE: Class name (Zf, Yf, ...) auto-detected ở trên.
  */
 const PATCHED =
-  `${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}.modelConfig?.modelName,...(()=>{try{const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;return{apiKey:this.cursorAuthenticationService.getApiKeyForModel(${SOURCE_VAR}.modelConfig?.modelName),openaiApiBaseUrl:_creds_s.openAIBaseUrl??void 0,azureState:_creds_s.azureState,bedrockState:_creds_s.bedrockState}}catch(_e){return{}}})()})`;
+  `${RESULT_VAR}=new ${MODEL_DETAILS_CLASS}({modelName:${SOURCE_VAR}.modelConfig?.modelName${MAX_MODE_SUFFIX},...(()=>{try{const _creds_s=this.reactiveStorageService.applicationUserPersistentStorage;return{apiKey:this.cursorAuthenticationService.getApiKeyForModel(${SOURCE_VAR}.modelConfig?.modelName),openaiApiBaseUrl:_creds_s.openAIBaseUrl??void 0,azureState:_creds_s.azureState,bedrockState:_creds_s.bedrockState}}catch(_e){return{}}})()})`;
 
 console.log("🔧 Patching summarize credentials...");
 const patched = data.replace(ORIGINAL, PATCHED);

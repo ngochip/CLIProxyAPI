@@ -356,6 +356,13 @@ type CloakConfig struct {
 	// CacheUserID controls whether Claude user_id values are cached per API key.
 	// When false, a fresh random user_id is generated for every request.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
+
+	// SanitizePrompt controls whether third-party identity markers are stripped
+	// from forwarded system prompts during OAuth cloaking.
+	// - nil (default): auto -- sanitize only for OAuth tokens (sk-ant-oat*)
+	// - true: always sanitize forwarded prompts when cloaking is active
+	// - false: disable sanitization (no-op, same as legacy behavior)
+	SanitizePrompt *bool `yaml:"sanitize-prompt,omitempty" json:"sanitize-prompt,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,

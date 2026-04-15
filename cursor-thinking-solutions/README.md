@@ -2,7 +2,7 @@
 
 Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 
-**Cursor version tested:** 3.0.12 (2026-04-04)
+**Cursor version tested:** 3.2.0 (2026-04-13)
 **OS:** macOS (darwin)
 
 ---
@@ -24,7 +24,7 @@ Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 
 ---
 
-## Patch Status (Cursor 3.0.12)
+## Patch Status (Cursor 3.2.0)
 
 | Patch | Trạng thái | Ghi chú |
 |-------|-----------|---------| 
@@ -43,6 +43,12 @@ Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 **Vấn đề:** Custom models gửi thinking content qua `delta.content`, nhưng Cursor không render thành native thinking UI. `reasoning_content` field cũng không được Cursor support (0 occurrences trong client code).
 
 **Giải pháp:** Patch `handleTextDelta` để detect thinking delimiters → redirect sang `handleThinkingDelta` → trigger native collapsible thinking blocks.
+
+**v8 (2026-04-13) - Cursor 3.2.0 compatibility:**
+- Fixed partial delimiter buffering: dùng regex-based partial match thay vì `startsWith` check.
+  SSE có thể split `<!--thinking-start:NONCE-->` tại bất kỳ vị trí nào (kể cả giữa nonce).
+  Old logic chỉ buffer khi tail ngắn hơn prefix (19 chars), fail khi split trong nonce portion.
+- Strip `<!--thinkId:xxx-->` markers khỏi text sau closing delimiter.
 
 **v7 (2026-04-04) - Cursor 3.0.12 compatibility:**
 Cursor 3.0+ thay đổi `handleTextDelta` pattern:

@@ -1863,7 +1863,7 @@ func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
 //	system[3]: system instructions (no cache_control)
 //	system[4]: doing tasks (no cache_control)
 //	system[5]: user system messages moved to first user message
-func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, oauthMode bool, version, entrypoint, workload string) []byte {
+func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, experimentalCCHSigning bool, sanitizePrompt bool, version, entrypoint, workload string) []byte {
 	system := gjson.GetBytes(payload, "system")
 
 	// Extract original message text for fingerprint computation (before billing injection).
@@ -1926,7 +1926,7 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 
 		if len(userSystemParts) > 0 {
 			combined := strings.Join(userSystemParts, "\n\n")
-			if oauthMode {
+			if sanitizePrompt {
 				combined = sanitizeForwardedSystemPrompt(combined)
 			}
 			if strings.TrimSpace(combined) != "" {
@@ -1938,19 +1938,57 @@ func checkSystemInstructionsWithSigningMode(payload []byte, strictMode bool, exp
 	return payload
 }
 
-// sanitizeForwardedSystemPrompt cleans up forwarded third-party system context
-// for Claude OAuth cloaking while preserving functional content (MCP descriptors,
-// tool instructions, rules, skills, etc.) that the model needs to operate correctly.
+// sanitizeForwardedSystemPrompt strips third-party identity markers from
+// forwarded system prompts while preserving functional content (MCP descriptors,
+// tool instructions, rules, skills, file paths, etc.).
 //
-// Only the client identity preamble (e.g. "You are an AI coding assistant, powered by ...")
-// is stripped; everything else is kept intact so that MCP servers, workspace rules,
-// agent skills, and similar operational context survive the cloaking pass.
+// Three stages:
+//  1. Remove paragraphs whose trimmed text starts with a known identity prefix
+//  2. Remove paragraphs containing a known third-party anchor URL
+//  3. Apply targeted inline text replacements for branded phrases
 func sanitizeForwardedSystemPrompt(text string) string {
 	trimmed := strings.TrimSpace(text)
 	if trimmed == "" {
 		return ""
 	}
-	return trimmed
+
+	paragraphs := strings.Split(trimmed, "\n\n")
+	filtered := make([]string, 0, len(paragraphs))
+
+	for _, p := range paragraphs {
+		skip := false
+		trimmedP := strings.TrimSpace(p)
+
+		for _, prefix := range helps.ThirdPartyIdentityPrefixes {
+			if strings.HasPrefix(trimmedP, prefix) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		for _, anchor := range helps.ThirdPartyAnchorURLs {
+			if strings.Contains(p, anchor) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		filtered = append(filtered, p)
+	}
+
+	result := strings.Join(filtered, "\n\n")
+
+	for _, r := range helps.ThirdPartyTextReplacements {
+		result = strings.ReplaceAll(result, r.Match, r.Replacement)
+	}
+
+	return strings.TrimSpace(result)
 }
 
 // buildTextBlock constructs a JSON text block object with proper escaping.
@@ -2056,6 +2094,12 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		}
 	}
 
+	// Resolve sanitize-prompt: nil=auto (sanitize for OAuth tokens), true/false=explicit
+	sanitizePrompt := oauthToken
+	if cloakCfg != nil && cloakCfg.SanitizePrompt != nil {
+		sanitizePrompt = *cloakCfg.SanitizePrompt
+	}
+
 	// Determine if cloaking should be applied
 	if !helps.ShouldCloak(cloakMode, clientUserAgent) {
 		return payload
@@ -2066,7 +2110,7 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		billingVersion := helps.DefaultClaudeVersion(cfg)
 		entrypoint := parseEntrypointFromUA(clientUserAgent)
 		workload := getWorkloadFromContext(ctx)
-		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, oauthToken, billingVersion, entrypoint, workload)
+		payload = checkSystemInstructionsWithSigningMode(payload, strictMode, useCCHSigning, sanitizePrompt, billingVersion, entrypoint, workload)
 	}
 
 	// Inject fake user ID

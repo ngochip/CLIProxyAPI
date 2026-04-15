@@ -4,6 +4,13 @@
  * Patch Cursor IDE workbench.
  *
  * Patch A: handleTextDelta - detect thinking delimiters → redirect sang handleThinkingDelta
+ *   v8 (2026-04-13) - Cursor 3.2.0 compatibility:
+ *     - Fixed partial delimiter buffering: regex-based partial match thay vì
+ *       startsWith check. Handles SSE splits within nonce (e.g. "<!--thinking-start:c"
+ *       + "4a7f9e1-->"). Old logic chỉ buffer khi tail < 19 chars (prefix length),
+ *       fail khi split xảy ra trong nonce portion.
+ *     - Strip <!--thinkId:xxx--> markers from text after closing delimiter.
+ *
  *   v6 (nonce-based delimiters):
  *     Proxy gửi nonce-based delimiters thay vì <think>/<\/think>:
  *       <!--thinking-start:XXXXXXXX--> / <!--thinking-end:XXXXXXXX-->
@@ -19,7 +26,7 @@
  *   --restore: Khôi phục file gốc từ backup
  *   --force:   Apply patch ngay cả khi đã bị disable (xem DISABLED_PATCHES)
  *
- * Tested on: Cursor 2.6.11, 2.6.18, 2.6.19, 3.0.12
+ * Tested on: Cursor 2.6.11, 2.6.18, 2.6.19, 3.0.12, 3.2.0
  */
 
 const fs = require("fs");
@@ -139,7 +146,7 @@ const PATCH_A_ORIGINAL = null; // auto-detect below
  */
 // Thinking logic core (shared between V1 and V2)
 function buildPatchA(cancelExpr) {
-  return 'handleTextDelta(n){if(n.length===0)return;if(!this.__thinkTagState)this.__thinkTagState={active:false,startTime:0,buf:"",nonce:""};const _s=this.__thinkTagState;let _txt=_s.buf+n;_s.buf="";if(!_s.active){const _sm=_txt.match(/<!--thinking-start:([0-9a-f]{8})-->/);if(_sm){const _oi=_sm.index;const _before=_txt.substring(0,_oi);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce=_sm[1];_s.startTime=Date.now();_txt=_txt.substring(_oi+_sm[0].length);if(_txt.length===0)return;}else{const _oi2=_txt.indexOf("<think>");if(_oi2!==-1){const _before=_txt.substring(0,_oi2);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce="";_s.startTime=Date.now();_txt=_txt.substring(_oi2+7);if(_txt.length===0)return;}else{let _bs=-1;for(let _k=Math.max(0,_txt.length-30);_k<_txt.length;_k++){const _tail=_txt.substring(_k);if("<!--thinking-start:".startsWith(_tail)||"<think>".startsWith(_tail)){if(_tail.length>=2){_bs=_k;break;}}}if(_bs!==-1){_s.buf=_txt.substring(_bs);_txt=_txt.substring(0,_bs);}if(_txt.length>0)this._origHandleTextDelta(_txt);return;}}}if(_s.active){let _ci=-1;let _tl=0;if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";_ci=_txt.indexOf(_et);_tl=_et.length;}else{_ci=_txt.indexOf("</think>");_tl=8;}if(_ci!==-1){const _tp=_txt.substring(0,_ci);if(_tp.length>0)this.handleThinkingDelta(_tp);const _dur=Math.max(1000,Date.now()-_s.startTime);_s.active=false;_s.startTime=0;_s.nonce="";const _after=_txt.substring(_ci+_tl);this.handleThinkingCompleted({message:{case:"thinkingCompleted",value:{thinkingDurationMs:_dur}}});if(_after.length>0)this.handleTextDelta(_after);return;}if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";for(let _k=Math.max(0,_txt.length-_et.length+1);_k<_txt.length;_k++){if(_et.startsWith(_txt.substring(_k))&&_txt.substring(_k).length>=2){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}else{for(let _k=Math.max(0,_txt.length-7);_k<_txt.length-1;_k++){if("</think>".startsWith(_txt.substring(_k))){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}if(_txt.length>0)this.handleThinkingDelta(_txt);return;}this._origHandleTextDelta(_txt)}_origHandleTextDelta(n){if(n.length===0)return;' + cancelExpr;
+  return 'handleTextDelta(n){if(n.length===0)return;if(!this.__thinkTagState)this.__thinkTagState={active:false,startTime:0,buf:"",nonce:""};const _s=this.__thinkTagState;let _txt=_s.buf+n;_s.buf="";if(!_s.active){const _sm=_txt.match(/<!--thinking-start:([0-9a-f]{8})-->/);if(_sm){const _oi=_sm.index;const _before=_txt.substring(0,_oi);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce=_sm[1];_s.startTime=Date.now();_txt=_txt.substring(_oi+_sm[0].length);if(_txt.length===0)return;}else{const _oi2=_txt.indexOf("<think>");if(_oi2!==-1){const _before=_txt.substring(0,_oi2);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce="";_s.startTime=Date.now();_txt=_txt.substring(_oi2+7);if(_txt.length===0)return;}else{let _bs=-1;const _pm=_txt.match(/<!--(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g(?:-(?:s(?:t(?:a(?:r(?:t(?::(?:[0-9a-f]{1,8}(?:-(?:->?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?$/);\nif(_pm){_bs=_pm.index;}else{const _pm2=_txt.match(/<(?:t(?:h(?:i(?:n(?:k(?:>)?)?)?)?)?)?$/);if(_pm2&&_pm2[0].length>=2)_bs=_pm2.index;}if(_bs!==-1){_s.buf=_txt.substring(_bs);_txt=_txt.substring(0,_bs);}if(_txt.length>0)this._origHandleTextDelta(_txt);return;}}}if(_s.active){let _ci=-1;let _tl=0;if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";_ci=_txt.indexOf(_et);_tl=_et.length;}else{_ci=_txt.indexOf("</think>");_tl=8;}if(_ci!==-1){const _tp=_txt.substring(0,_ci);if(_tp.length>0)this.handleThinkingDelta(_tp);const _dur=Math.max(1000,Date.now()-_s.startTime);_s.active=false;_s.startTime=0;_s.nonce="";let _after=_txt.substring(_ci+_tl);_after=_after.replace(/<!--thinkId:[a-f0-9]+-->/g,"");this.handleThinkingCompleted({message:{case:"thinkingCompleted",value:{thinkingDurationMs:_dur}}});if(_after.length>0)this.handleTextDelta(_after);return;}if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";for(let _k=Math.max(0,_txt.length-_et.length+1);_k<_txt.length;_k++){if(_et.startsWith(_txt.substring(_k))&&_txt.substring(_k).length>=2){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}else{for(let _k=Math.max(0,_txt.length-7);_k<_txt.length-1;_k++){if("</think>".startsWith(_txt.substring(_k))){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}if(_txt.length>0)this.handleThinkingDelta(_txt);return;}this._origHandleTextDelta(_txt)}_origHandleTextDelta(n){if(n.length===0)return;' + cancelExpr;
 }
 
 // --- Auto-detect pattern version ---
@@ -255,18 +262,23 @@ const PATCH_B_ORIGINAL_V2 =
   'f=new Yf({modelName:l.modelConfig?.modelName})';
 const PATCH_B_ORIGINAL_V1 =
   'f=new jf({modelName:l.modelConfig?.modelName})';
+// Cursor 3.2+ thêm maxMode param
+const PATCH_B_ORIGINAL_V3 =
+  'f=new ng({modelName:l.modelConfig?.modelName,maxMode:!1})';
 
-// Auto-detect regex cho bất kỳ class name nào (vd: Yf, jf, Qg, $f...)
+// Auto-detect regex cho bất kỳ class name nào (vd: Yf, jf, Qg, ng...)
 // Dùng [\w$] vì minified identifier có thể chứa $
-const PATCH_B_AUTO_REGEX = /([\w$])=new ([\w$]+)\(\{modelName:([\w$]+)\.modelConfig\?\.modelName\}\)/;
+// Pattern: <var>=new <Class>({modelName:<src>.modelConfig?.modelName}) hoặc thêm ,maxMode:!1
+const PATCH_B_AUTO_REGEX = /([\w$])=new ([\w$]+)\(\{modelName:([\w$]+)\.modelConfig\?\.modelName(,maxMode:![01])?\}\)/;
 
-// Thêm credentials vào Yf/jf constructor giống normal chat
+// Thêm credentials vào constructor giống normal chat
 // → convertModelDetailsToCredentials(f) sẽ trả về apiKeyCredentials với proxy baseUrl
 // → Cursor server forward summarize request qua proxy
-function buildPatchB(className, resultVar, sourceVar) {
+function buildPatchB(className, resultVar, sourceVar, maxModeSuffix) {
   resultVar = resultVar || 'f';
   sourceVar = sourceVar || 'l';
-  return resultVar + '=new ' + className + '({modelName:' + sourceVar + '.modelConfig?.modelName,apiKey:this.cursorAuthenticationService.getApiKeyForModel(' + sourceVar + '.modelConfig?.modelName),openaiApiBaseUrl:this.reactiveStorageService.applicationUserPersistentStorage.openAIBaseUrl??void 0})/*' + PATCH_B_MARKER + '*/';
+  maxModeSuffix = maxModeSuffix || '';
+  return resultVar + '=new ' + className + '({modelName:' + sourceVar + '.modelConfig?.modelName' + maxModeSuffix + ',apiKey:this.cursorAuthenticationService.getApiKeyForModel(' + sourceVar + '.modelConfig?.modelName),openaiApiBaseUrl:this.reactiveStorageService.applicationUserPersistentStorage.openAIBaseUrl??void 0})/*' + PATCH_B_MARKER + '*/';
 }
 
 const patchBApplied = data.includes(PATCH_B_MARKER);
@@ -286,8 +298,14 @@ if (!patchBApplied) {
     let detectedClassName = null;
     let detectedResultVar = 'f';
     let detectedSourceVar = 'l';
+    let detectedMaxMode = '';
 
-    if (data.includes(PATCH_B_ORIGINAL_V2)) {
+    if (data.includes(PATCH_B_ORIGINAL_V3)) {
+      detectedBOriginal = PATCH_B_ORIGINAL_V3;
+      detectedBVersion = "V3 (ng with maxMode)";
+      detectedClassName = "ng";
+      detectedMaxMode = ",maxMode:!1";
+    } else if (data.includes(PATCH_B_ORIGINAL_V2)) {
       detectedBOriginal = PATCH_B_ORIGINAL_V2;
       detectedBVersion = "V2 (Yf without creds)";
       detectedClassName = "Yf";
@@ -307,6 +325,7 @@ if (!patchBApplied) {
           detectedResultVar = autoMatch[1];
           detectedClassName = autoMatch[2];
           detectedSourceVar = autoMatch[3];
+          detectedMaxMode = autoMatch[4] || '';
           detectedBVersion = `auto-detected (${detectedClassName} without creds)`;
         }
       }
@@ -332,7 +351,7 @@ if (!patchBApplied) {
           `❌ Patch B: Found ${countB} occurrences. Expected 1.`
         );
       } else {
-        const PATCH_B_PATCHED = buildPatchB(detectedClassName, detectedResultVar, detectedSourceVar);
+        const PATCH_B_PATCHED = buildPatchB(detectedClassName, detectedResultVar, detectedSourceVar, detectedMaxMode);
         console.log(
           `🔧 Applying Patch B (${detectedBVersion}): summarize() → add credentials to ${detectedClassName}...`
         );
