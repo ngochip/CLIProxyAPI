@@ -4,6 +4,12 @@
  * Patch Cursor IDE workbench.
  *
  * Patch A: handleTextDelta - detect thinking delimiters → redirect sang handleThinkingDelta
+ *   v9 (2026-04-15) - Fix partial delimiter buffering:
+ *     - Unified partial-open regex covers ALL prefixes: <, <!, <!-, <!--, ..., <!--thinking-start:NONCE--
+ *     - Also covers legacy <think> prefixes: <t, <th, ..., <think
+ *     - Closing tag partial buffer threshold lowered to length>=1 (was >=2)
+ *     - Legacy </think> partial buffer includes single "<" at end
+ *
  *   v8 (2026-04-13) - Cursor 3.2.0 compatibility:
  *     - Fixed partial delimiter buffering: regex-based partial match thay vì
  *       startsWith check. Handles SSE splits within nonce (e.g. "<!--thinking-start:c"
@@ -115,7 +121,7 @@ const PATCH_A_ORIGINAL_V1 =
 const PATCH_A_ORIGINAL = null; // auto-detect below
 
 /**
- * Patch A strategy (v6 - nonce-based delimiters, compatible with Cursor 2.6.11+):
+ * Patch A strategy (v9 - improved partial delimiter buffering):
  *
  * State: __thinkTagState = {active, startTime, buf, nonce}
  *   - active: đang trong thinking block
@@ -126,11 +132,12 @@ const PATCH_A_ORIGINAL = null; // auto-detect below
  * Delimiter format (proxy v6+):
  *   Opening: <!--thinking-start:XXXXXXXX-->  (XXXXXXXX = random nonce)
  *   Closing: <!--thinking-end:XXXXXXXX-->    (same nonce)
- *   Nonce match đảm bảo closing tag KHÔNG bao giờ false-positive,
- *   kể cả khi thinking content chứa </think>, code blocks, XML tags, etc.
  *
- * Backward compatibility:
- *   Vẫn detect legacy <think>/<\/think> format (nonce = '' → naive indexOf match).
+ * v9 changes:
+ *   - Unified partial-open regex covers ALL prefixes including <, <!, <!-
+ *     (v8 missed these 3 positions, causing tag loss on unlucky TCP splits)
+ *   - Closing tag partial buffer accepts length>=1 (v8 required >=2)
+ *   - Legacy </think> partial buffer includes single "<" at end
  *
  * Flow:
  *   1. Prepend buffer từ delta trước (xử lý delimiter split)
@@ -146,7 +153,13 @@ const PATCH_A_ORIGINAL = null; // auto-detect below
  */
 // Thinking logic core (shared between V1 and V2)
 function buildPatchA(cancelExpr) {
-  return 'handleTextDelta(n){if(n.length===0)return;if(!this.__thinkTagState)this.__thinkTagState={active:false,startTime:0,buf:"",nonce:""};const _s=this.__thinkTagState;let _txt=_s.buf+n;_s.buf="";if(!_s.active){const _sm=_txt.match(/<!--thinking-start:([0-9a-f]{8})-->/);if(_sm){const _oi=_sm.index;const _before=_txt.substring(0,_oi);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce=_sm[1];_s.startTime=Date.now();_txt=_txt.substring(_oi+_sm[0].length);if(_txt.length===0)return;}else{const _oi2=_txt.indexOf("<think>");if(_oi2!==-1){const _before=_txt.substring(0,_oi2);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce="";_s.startTime=Date.now();_txt=_txt.substring(_oi2+7);if(_txt.length===0)return;}else{let _bs=-1;const _pm=_txt.match(/<!--(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g(?:-(?:s(?:t(?:a(?:r(?:t(?::(?:[0-9a-f]{1,8}(?:-(?:->?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?$/);\nif(_pm){_bs=_pm.index;}else{const _pm2=_txt.match(/<(?:t(?:h(?:i(?:n(?:k(?:>)?)?)?)?)?)?$/);if(_pm2&&_pm2[0].length>=2)_bs=_pm2.index;}if(_bs!==-1){_s.buf=_txt.substring(_bs);_txt=_txt.substring(0,_bs);}if(_txt.length>0)this._origHandleTextDelta(_txt);return;}}}if(_s.active){let _ci=-1;let _tl=0;if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";_ci=_txt.indexOf(_et);_tl=_et.length;}else{_ci=_txt.indexOf("</think>");_tl=8;}if(_ci!==-1){const _tp=_txt.substring(0,_ci);if(_tp.length>0)this.handleThinkingDelta(_tp);const _dur=Math.max(1000,Date.now()-_s.startTime);_s.active=false;_s.startTime=0;_s.nonce="";let _after=_txt.substring(_ci+_tl);_after=_after.replace(/<!--thinkId:[a-f0-9]+-->/g,"");this.handleThinkingCompleted({message:{case:"thinkingCompleted",value:{thinkingDurationMs:_dur}}});if(_after.length>0)this.handleTextDelta(_after);return;}if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";for(let _k=Math.max(0,_txt.length-_et.length+1);_k<_txt.length;_k++){if(_et.startsWith(_txt.substring(_k))&&_txt.substring(_k).length>=2){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}else{for(let _k=Math.max(0,_txt.length-7);_k<_txt.length-1;_k++){if("</think>".startsWith(_txt.substring(_k))){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}if(_txt.length>0)this.handleThinkingDelta(_txt);return;}this._origHandleTextDelta(_txt)}_origHandleTextDelta(n){if(n.length===0)return;' + cancelExpr;
+  // Unified partial opening tag regex - matches any trailing suffix that could be
+  // the beginning of <!--thinking-start:NONCE--> or legacy <think>.
+  // Covers ALL positions: <, <!, <!-, <!--, <!--t, ..., <!--thinking-start:NONCE--
+  // Also covers legacy: <t, <th, <thi, <thin, <think
+  const partialOpenRegex = '/(?:<(?:!(?:-(?:-(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g(?:-(?:s(?:t(?:a(?:r(?:t(?::(?:[0-9a-f]{1,8}(?:-(?:-)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?)?|<(?:t(?:h(?:i(?:n(?:k)?)?)?)?)?)$/';
+
+  return 'handleTextDelta(n){if(n.length===0)return;if(!this.__thinkTagState)this.__thinkTagState={active:false,startTime:0,buf:"",nonce:""};const _s=this.__thinkTagState;let _txt=_s.buf+n;_s.buf="";if(!_s.active){const _sm=_txt.match(/<!--thinking-start:([0-9a-f]{8})-->/);if(_sm){const _oi=_sm.index;const _before=_txt.substring(0,_oi);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce=_sm[1];_s.startTime=Date.now();_txt=_txt.substring(_oi+_sm[0].length);if(_txt.length===0)return;}else{const _oi2=_txt.indexOf("<think>");if(_oi2!==-1){const _before=_txt.substring(0,_oi2);if(_before.length>0)this._origHandleTextDelta(_before);_s.active=true;_s.nonce="";_s.startTime=Date.now();_txt=_txt.substring(_oi2+7);if(_txt.length===0)return;}else{let _bs=-1;const _pm=_txt.match(' + partialOpenRegex + ');\nif(_pm){_bs=_pm.index;}if(_bs!==-1){_s.buf=_txt.substring(_bs);_txt=_txt.substring(0,_bs);}if(_txt.length>0)this._origHandleTextDelta(_txt);return;}}}if(_s.active){let _ci=-1;let _tl=0;if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";_ci=_txt.indexOf(_et);_tl=_et.length;}else{_ci=_txt.indexOf("</think>");_tl=8;}if(_ci!==-1){const _tp=_txt.substring(0,_ci);if(_tp.length>0)this.handleThinkingDelta(_tp);const _dur=Math.max(1000,Date.now()-_s.startTime);_s.active=false;_s.startTime=0;_s.nonce="";let _after=_txt.substring(_ci+_tl);_after=_after.replace(/<!--thinkId:[a-f0-9]+-->/g,"");this.handleThinkingCompleted({message:{case:"thinkingCompleted",value:{thinkingDurationMs:_dur}}});if(_after.length>0)this.handleTextDelta(_after);return;}if(_s.nonce){const _et="<!--thinking-end:"+_s.nonce+"-->";for(let _k=Math.max(0,_txt.length-_et.length+1);_k<_txt.length;_k++){if(_et.startsWith(_txt.substring(_k))&&_txt.substring(_k).length>=1){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}else{for(let _k=Math.max(0,_txt.length-7);_k<_txt.length;_k++){if("</think>".startsWith(_txt.substring(_k))){_s.buf=_txt.substring(_k);_txt=_txt.substring(0,_k);break;}}}if(_txt.length>0)this.handleThinkingDelta(_txt);return;}this._origHandleTextDelta(_txt)}_origHandleTextDelta(n){if(n.length===0)return;' + cancelExpr;
 }
 
 // --- Auto-detect pattern version ---
