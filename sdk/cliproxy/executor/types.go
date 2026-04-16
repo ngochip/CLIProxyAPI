@@ -17,6 +17,10 @@ const (
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.
 	SelectedAuthCallbackMetadataKey = "selected_auth_callback"
+	// StalePinCleanupCallbackMetadataKey carries an optional callback invoked when a
+	// stale pinned auth is detected. The conductor calls this to let the caller
+	// (e.g. sticky session) remove the outdated entry immediately.
+	StalePinCleanupCallbackMetadataKey = "stale_pin_cleanup_callback"
 	// ExecutionSessionMetadataKey identifies a long-lived downstream execution session.
 	ExecutionSessionMetadataKey = "execution_session_id"
 )

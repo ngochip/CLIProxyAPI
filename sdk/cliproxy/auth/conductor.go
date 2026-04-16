@@ -1264,6 +1264,12 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			// If the failure is due to a stale sticky-session pin, clear
+			// the pin and retry with normal round-robin selection.
+			if isStalePinnedAuthError(errPick, opts.Metadata) {
+				clearPinnedAuthFromMetadata(opts.Metadata)
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1342,6 +1348,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if isStalePinnedAuthError(errPick, opts.Metadata) {
+				clearPinnedAuthFromMetadata(opts.Metadata)
+				continue
+			}
 			if lastErr != nil {
 				return cliproxyexecutor.Response{}, lastErr
 			}
@@ -1424,6 +1434,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		}
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, opts, tried)
 		if errPick != nil {
+			if isStalePinnedAuthError(errPick, opts.Metadata) {
+				clearPinnedAuthFromMetadata(opts.Metadata)
+				continue
+			}
 			if lastErr != nil {
 				var bootstrapErr *streamBootstrapError
 				if errors.As(lastErr, &bootstrapErr) && bootstrapErr != nil {
@@ -1533,6 +1547,38 @@ func publishSelectedAuthMetadata(meta map[string]any, authID string) {
 	if callback, ok := meta[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string)); ok && callback != nil {
 		callback(authID)
 	}
+}
+
+// clearPinnedAuthFromMetadata removes the pinned auth hint so the next
+// pick attempt falls back to normal round-robin selection. If a stale-pin
+// cleanup callback is present (installed by the sticky session layer), it
+// is invoked to remove the sticky entry immediately so subsequent requests
+// with the same conversation key are not slowed down by the stale pin.
+func clearPinnedAuthFromMetadata(meta map[string]any) bool {
+	if len(meta) == 0 {
+		return false
+	}
+	if _, ok := meta[cliproxyexecutor.PinnedAuthMetadataKey]; !ok {
+		return false
+	}
+	delete(meta, cliproxyexecutor.PinnedAuthMetadataKey)
+	if cleanup, ok := meta[cliproxyexecutor.StalePinCleanupCallbackMetadataKey].(func()); ok && cleanup != nil {
+		cleanup()
+	}
+	return true
+}
+
+// isStalePinnedAuthError returns true when a pick failure is caused by the
+// scheduler not finding the pinned auth (stale sticky session).
+func isStalePinnedAuthError(err error, meta map[string]any) bool {
+	if pinnedAuthIDFromMetadata(meta) == "" {
+		return false
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return false
+	}
+	return authErr.Code == "auth_not_found" || authErr.Code == "auth_unavailable"
 }
 
 func rewriteModelForAuth(model string, auth *Auth) string {

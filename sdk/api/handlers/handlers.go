@@ -56,6 +56,7 @@ const (
 
 type pinnedAuthContextKey struct{}
 type selectedAuthCallbackContextKey struct{}
+type stalePinCleanupCallbackContextKey struct{}
 type executionSessionContextKey struct{}
 
 // WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
@@ -97,6 +98,10 @@ func WithExecutionSessionID(ctx context.Context, sessionID string) context.Conte
 // If a conversation is already pinned to an auth, WithPinnedAuthID is set.
 // Otherwise, a callback is set to capture the selected auth on first use.
 // Returns the modified context. No-op if sticky sessions are disabled in config.
+//
+// TTL is only refreshed via the callback after a successful auth selection,
+// not on lookup. This prevents stale entries (pointing to removed/blocked
+// auths) from being kept alive indefinitely by failing requests.
 func ApplyStickySession(ctx context.Context, cfg *config.SDKConfig, rawJSON []byte) context.Context {
 	if cfg == nil || !cfg.StickySession.Enabled {
 		return ctx
@@ -111,10 +116,17 @@ func ApplyStickySession(ctx context.Context, cfg *config.SDKConfig, rawJSON []by
 	store := cache.GetStickySessionStore(ttl)
 
 	if pinnedAuth := store.Lookup(convKey); pinnedAuth != "" {
-		store.Set(convKey, pinnedAuth)
-		return WithPinnedAuthID(ctx, pinnedAuth)
+		ctx = WithPinnedAuthID(ctx, pinnedAuth)
+		// Install a cleanup callback so the conductor can remove the stale
+		// sticky entry immediately when the pinned auth is not found.
+		ctx = context.WithValue(ctx, stalePinCleanupCallbackContextKey{}, func() {
+			store.Remove(convKey)
+		})
 	}
 
+	// Always install a selection callback: on success it refreshes (or
+	// creates) the sticky entry with the auth that actually served the
+	// request.
 	return WithSelectedAuthIDCallback(ctx, func(authID string) {
 		store.Set(convKey, authID)
 	})
@@ -234,6 +246,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
 		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
 	}
+	if stalePinCleanup := stalePinCleanupCallbackFromContext(ctx); stalePinCleanup != nil {
+		meta[coreexecutor.StalePinCleanupCallbackMetadataKey] = stalePinCleanup
+	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
@@ -261,6 +276,17 @@ func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
 	}
 	raw := ctx.Value(selectedAuthCallbackContextKey{})
 	if callback, ok := raw.(func(string)); ok && callback != nil {
+		return callback
+	}
+	return nil
+}
+
+func stalePinCleanupCallbackFromContext(ctx context.Context) func() {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(stalePinCleanupCallbackContextKey{})
+	if callback, ok := raw.(func()); ok && callback != nil {
 		return callback
 	}
 	return nil
