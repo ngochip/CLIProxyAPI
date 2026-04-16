@@ -27,7 +27,7 @@
  *
  * Usage: node patch-cursor-smooth-streaming.js [--restore]
  *
- * Tested on: Cursor 2.6.19+, 3.0.12
+ * Tested on: Cursor 2.6.19+, 3.0.12, 0.50.x
  */
 
 const fs = require("fs");
@@ -100,9 +100,9 @@ const PATCH_MARKER = "__textWordStreamer";
  */
 
 // Capture groups: (1)=serviceName, (2)=typeEnum, (3)=helperFn, (4)=batchFn
-// Dùng [\\w$]+ thay vì \\w+ vì minified identifier có thể chứa $ (vd: $l, $e)
-function buildOrigRegex(cancelPrefix) {
-  return new RegExp(
+// [\\w$]+ vì minified identifier có thể chứa $ (vd: $l, $e)
+function buildOrigRegexes(cancelPrefix) {
+  const head =
     '_origHandleTextDelta\\(n\\)\\{' +
     'if\\(n\\.length===0\\)return;' +
     cancelPrefix +
@@ -120,24 +120,55 @@ function buildOrigRegex(cancelPrefix) {
     'l=>l\\("generatingBubbleIds",\\[a\\.bubbleId\\]\\)\\)\\}\\)\\}' +
     'const s=e\\.getLastAiBubble\\(this\\.composerDataHandle\\);' +
     'if\\(!s\\)return;' +
-    'const o=s\\.text\\+n;' +
+    'const o=s\\.text\\+n;';
+
+  // V3 tail (Cursor 0.50+): updateComposerBubbleSetStore(handle, bubbleId, fn)
+  const tailV3 =
+    'e\\.updateComposerBubbleSetStore\\(this\\.composerDataHandle,' +
+    's\\.bubbleId,a=>a\\("text",o\\)\\)\\}';
+
+  // V2 tail (Cursor 3.0 – 0.49): updateComposerDataSetStore(handle, fn("conversationMap",...))
+  const tailV2 =
     'e\\.updateComposerDataSetStore\\(this\\.composerDataHandle,' +
-    'a=>a\\("conversationMap",s\\.bubbleId,"text",o\\)\\)\\}'
-  );
+    'a=>a\\("conversationMap",s\\.bubbleId,"text",o\\)\\)\\}';
+
+  return [
+    { regex: new RegExp(head + tailV3), storeApi: 'bubbleSetStore' },
+    { regex: new RegExp(head + tailV2), storeApi: 'dataSetStore' },
+  ];
 }
 
-// V2 (Cursor 3.0+): this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls()
-// V1 (Cursor 2.6.x): this.cancelUnfinishedToolCalls()
-const ORIG_REGEX_V2 = buildOrigRegex('this\\.options\\.preserveUnfinishedToolsOnNarration\\|\\|this\\.cancelUnfinishedToolCalls\\(\\),');
-const ORIG_REGEX_V1 = buildOrigRegex('this\\.cancelUnfinishedToolCalls\\(\\),');
+// Cancel prefix variants
+const CANCEL_PREFIXES = [
+  {
+    prefix: 'this\\.options\\.preserveUnfinishedToolsOnNarration\\|\\|this\\.cancelUnfinishedToolCalls\\(\\),',
+    expr: 'this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls(),',
+    label: 'V2+',
+  },
+  {
+    prefix: 'this\\.cancelUnfinishedToolCalls\\(\\),',
+    expr: 'this.cancelUnfinishedToolCalls(),',
+    label: 'V1',
+  },
+];
 
-let origMatch = data.match(ORIG_REGEX_V2);
-let cancelExprSmooth = 'this.options.preserveUnfinishedToolsOnNarration||this.cancelUnfinishedToolCalls(),';
-let smoothVersion = 'V2 (Cursor 3.0+)';
-if (!origMatch) {
-  origMatch = data.match(ORIG_REGEX_V1);
-  cancelExprSmooth = 'this.cancelUnfinishedToolCalls(),';
-  smoothVersion = 'V1 (Cursor 2.6.x)';
+let origMatch = null;
+let cancelExprSmooth = '';
+let smoothVersion = '';
+let storeApi = '';
+
+for (const cp of CANCEL_PREFIXES) {
+  for (const variant of buildOrigRegexes(cp.prefix)) {
+    const m = data.match(variant.regex);
+    if (m) {
+      origMatch = m;
+      cancelExprSmooth = cp.expr;
+      storeApi = variant.storeApi;
+      smoothVersion = `${cp.label} / ${variant.storeApi}`;
+      break;
+    }
+  }
+  if (origMatch) break;
 }
 
 let PATCH_ORIGINAL = null;
@@ -150,6 +181,16 @@ if (origMatch) {
   const helperFn = origMatch[3];
   const batchFn = origMatch[4];
   console.log(`   Detected ${smoothVersion}: service=${serviceName}, type=${typeEnum}, helpers: ${helperFn}(), ${batchFn}()`);
+
+  // Build store-update snippet based on detected API
+  let appendTextStoreLine, fallbackStoreLine;
+  if (storeApi === 'bubbleSetStore') {
+    appendTextStoreLine = 'e.updateComposerBubbleSetStore(this.composerDataHandle,t.bubbleId,a=>a("text",i))';
+    fallbackStoreLine = 'e.updateComposerBubbleSetStore(this.composerDataHandle,s.bubbleId,a=>a("text",o))';
+  } else {
+    appendTextStoreLine = 'e.updateComposerDataSetStore(this.composerDataHandle,a=>a("conversationMap",t.bubbleId,"text",i))';
+    fallbackStoreLine = 'e.updateComposerDataSetStore(this.composerDataHandle,a=>a("conversationMap",s.bubbleId,"text",o))';
+  }
 
   PATCH_PATCHED =
     '_origHandleTextDelta(n){if(n.length===0)return;' +
@@ -170,16 +211,14 @@ if (origMatch) {
     'if(a){this.__textWordStreamer=new a(l=>this._appendTextChunk(l))}' +
     'else{const s=e.getLastAiBubble(this.composerDataHandle);' +
     'if(!s)return;const o=s.text+n;' +
-    'e.updateComposerDataSetStore(this.composerDataHandle,' +
-    'a=>a("conversationMap",s.bubbleId,"text",o));return}}' +
+    fallbackStoreLine + ';return}}' +
     'this.__textWordStreamer.enqueue(n)}' +
     '_flushTextStreamer(){this.__textWordStreamer&&this.__textWordStreamer.flush()}' +
     '_appendTextChunk(n){' +
     'const e=this.instantiationService.invokeFunction(a=>a.get(' + serviceName + ')),' +
     't=e.getLastAiBubble(this.composerDataHandle);' +
     'if(!t)return;const i=t.text+n;' +
-    'e.updateComposerDataSetStore(this.composerDataHandle,' +
-    'a=>a("conversationMap",t.bubbleId,"text",i))}';
+    appendTextStoreLine + '}';
 }
 
 const FLUSH_INJECT_CANCEL_ORIGINAL = "cancelUnfinishedToolCalls(){";
@@ -239,6 +278,15 @@ if (!PATCH_ORIGINAL) {
   console.error(
     "   Regex could not match method body. Minified structure may differ significantly."
   );
+  // Debug: show what we actually see
+  const idx = data.indexOf('_origHandleTextDelta(n){');
+  if (idx !== -1) {
+    console.error("\n   DEBUG: Found _origHandleTextDelta at index", idx);
+    console.error("   Actual code (first 900 chars):");
+    console.error("   " + data.substring(idx, idx + 900));
+  } else {
+    console.error("   DEBUG: _origHandleTextDelta(n){ not found at all in workbench.");
+  }
   process.exit(1);
 }
 

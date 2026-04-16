@@ -2,7 +2,7 @@
 
 Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 
-**Cursor version tested:** 3.2.0 (2026-04-13)
+**Cursor version tested:** 3.2.0+ (2026-04-16)
 **OS:** macOS (darwin)
 
 ---
@@ -24,7 +24,7 @@ Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 
 ---
 
-## Patch Status (Cursor 3.2.0)
+## Patch Status (Cursor 3.2.0+)
 
 | Patch | Trạng thái | Ghi chú |
 |-------|-----------|---------| 
@@ -90,6 +90,13 @@ V1 (2.6.x): handleTextDelta(n){if(n.length===0)return;this.cancelUnfinishedToolC
 
 Auto-flush khi: tool calls start, thinking blocks start, stream completes.
 
+**v3 (2026-04-16) - Cursor 0.50+ compatibility:**
+Cursor 0.50+ đổi store API cuối method `_origHandleTextDelta`:
+- V2 (3.0 – 0.49): `e.updateComposerDataSetStore(handle, fn("conversationMap", bubbleId, "text", o))`
+- V3 (0.50+): `e.updateComposerBubbleSetStore(handle, bubbleId, fn("text", o))`
+
+Patch giờ thử 4 combinations (2 cancel prefix × 2 store API) và dùng đúng API cho cả patched `_appendTextChunk` method. Thêm debug output khi regex fail.
+
 **v2 (2026-04-04):** Auto-detect minified names thay vì hardcode (`Oa`→`Ua`, `ul`→`Pc`, etc.). Support cả Cursor 2.6.x và 3.0+.
 
 ### 3. Summarize Credentials Patch (`patch-cursor-summarize-credentials.js`)
@@ -140,13 +147,14 @@ rm -f "/Applications/Cursor.app/Contents/Resources/app/product.json.backup"
 
 Tất cả patches tự auto-detect Cursor version:
 
-| Pattern | Cursor 2.6.x | Cursor 3.0+ |
-|---------|-------------|-------------|
-| handleTextDelta cancel | `this.cancelUnfinishedToolCalls()` | `this.options.preserveUnfinishedToolsOnNarration\|\|this.cancelUnfinishedToolCalls()` |
-| Minified service token | `Oa` | `Ua` (auto-detected) |
-| Minified type enum | `ul` | `Pc` (auto-detected) |
-| Summarize vars | `f=new Zf({modelName:u...})` | `g=new Qg({modelName:l...})` (auto-detected) |
-| Subagent pattern | V2 (getModelConfig spread) | V2 (same pattern) |
+| Pattern | Cursor 2.6.x | Cursor 3.0 – 0.49 | Cursor 0.50+ |
+|---------|-------------|-------------|-------------|
+| handleTextDelta cancel | `this.cancelUnfinishedToolCalls()` | `this.options.preserveUnfinishedToolsOnNarration\|\|this.cancelUnfinishedToolCalls()` | same as 3.0 |
+| Store API (text update) | `updateComposerDataSetStore` | `updateComposerDataSetStore` | `updateComposerBubbleSetStore` |
+| Minified service token | `Oa` | `Ua` | `al` (auto-detected) |
+| Minified type enum | `ul` | `Pc` | `Rl` (auto-detected) |
+| Summarize vars | `f=new Zf({modelName:u...})` | `g=new Qg({modelName:l...})` | auto-detected |
+| Subagent pattern | V2 (getModelConfig spread) | V2 (same pattern) | V2 (same pattern) |
 
 ### Nếu pattern thay đổi
 
