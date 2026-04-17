@@ -101,7 +101,6 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		return applySpeed(applyEffort(body, config), config), nil
 	}
 
-
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		body = []byte(`{}`)
 	}
@@ -112,10 +111,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 	case thinking.ModeNone:
 		result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result, _ = sjson.DeleteBytes(result, "output_config.effort")
-		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-			result, _ = sjson.DeleteBytes(result, "output_config")
-		}
+		result = applyEffortOrDelete(result, config)
 		result = applySpeed(result, config)
 		return result, nil
 
@@ -126,6 +122,7 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
 			result, _ = sjson.SetBytes(result, "output_config.effort", string(config.Level))
+			result = applySpeed(result, config)
 			return result, nil
 		}
 
@@ -145,22 +142,18 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		if config.Budget == 0 {
 			result, _ := sjson.SetBytes(body, "thinking.type", "disabled")
 			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-			result, _ = sjson.DeleteBytes(result, "output_config.effort")
-			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-				result, _ = sjson.DeleteBytes(result, "output_config")
-			}
+			result = applyEffortOrDelete(result, config)
+			result = applySpeed(result, config)
 			return result, nil
 		}
 
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.SetBytes(result, "thinking.budget_tokens", config.Budget)
-		result, _ = sjson.DeleteBytes(result, "output_config.effort")
-		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-			result, _ = sjson.DeleteBytes(result, "output_config")
-		}
+		result = applyEffortOrDelete(result, config)
 
 		// Ensure max_tokens > thinking.budget_tokens (Anthropic API constraint).
 		result = a.normalizeClaudeBudget(result, config.Budget, modelInfo)
+		result = applySpeed(result, config)
 		return result, nil
 
 	case thinking.ModeAuto:
@@ -168,26 +161,37 @@ func (a *Applier) Apply(body []byte, config thinking.ThinkingConfig, modelInfo *
 		if supportsAdaptive {
 			result, _ := sjson.SetBytes(body, "thinking.type", "adaptive")
 			result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-			// Explicit effort is optional for adaptive thinking; omit it to allow upstream default.
-			result, _ = sjson.DeleteBytes(result, "output_config.effort")
-			if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-				result, _ = sjson.DeleteBytes(result, "output_config")
-			}
+			// Preserve explicit effort từ compound suffix (ví dụ: auto+max → effort=max).
+			result = applyEffortOrDelete(result, config)
+			result = applySpeed(result, config)
 			return result, nil
 		}
 
 		// Legacy fallback: enable thinking without specifying budget_tokens.
 		result, _ := sjson.SetBytes(body, "thinking.type", "enabled")
 		result, _ = sjson.DeleteBytes(result, "thinking.budget_tokens")
-		result, _ = sjson.DeleteBytes(result, "output_config.effort")
-		if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
-			result, _ = sjson.DeleteBytes(result, "output_config")
-		}
+		result = applyEffortOrDelete(result, config)
+		result = applySpeed(result, config)
 		return result, nil
 
 	default:
 		return body, nil
 	}
+}
+
+// applyEffortOrDelete ghi output_config.effort nếu config.Effort được chỉ định,
+// ngược lại xóa key và prune output_config object rỗng.
+// Dùng để preserve effort từ compound suffix (ví dụ: auto+max → effort=max).
+func applyEffortOrDelete(body []byte, config thinking.ThinkingConfig) []byte {
+	if config.Effort != "" {
+		result, _ := sjson.SetBytes(body, "output_config.effort", config.Effort)
+		return result
+	}
+	result, _ := sjson.DeleteBytes(body, "output_config.effort")
+	if oc := gjson.GetBytes(result, "output_config"); oc.Exists() && oc.IsObject() && len(oc.Map()) == 0 {
+		result, _ = sjson.DeleteBytes(result, "output_config")
+	}
+	return result
 }
 
 // isSpeedOnly returns true khi config CHỈ có Speed, không có thinking mode hay effort nào.

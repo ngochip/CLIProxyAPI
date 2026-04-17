@@ -86,6 +86,7 @@
         "min": 1024,
         "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
