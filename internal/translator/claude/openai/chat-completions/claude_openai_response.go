@@ -53,15 +53,14 @@ type ToolCallAccumulator struct {
 
 // ThinkingAccumulator holds the state for accumulating thinking data.
 //
-// OpeningEmitted đánh dấu `<!--thinking-start:NONCE-->` đã được stream ra client.
-// Ta defer emit opening đến khi thinking_delta đầu tiên thực sự có content, để
-// bỏ hẳn những empty thinking block (adaptive mode hay emit) — tránh việc Cursor
-// hiển thị bubble "Thought 1s" trống rỗng.
+// PendingOpening chứa opening delta đã pre-build ở content_block_start, sẽ được flush
+// khi thinking_delta đầu tiên xuất hiện. Nếu block rỗng (không có thinking_delta), ta
+// DROP luôn PendingOpening (không emit gì) để Cursor khỏi hiện bubble "Thought 1s" trống.
 type ThinkingAccumulator struct {
 	Thinking       strings.Builder
 	Signature      strings.Builder
 	Nonce          string
-	OpeningEmitted bool
+	PendingOpening []byte
 }
 
 func generateThinkingNonce() string {
@@ -192,9 +191,9 @@ func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, origin
 				// Don't output anything yet - wait for complete tool call
 				return [][]byte{}
 			} else if blockType == "thinking" {
-				// Defer emit opening delimiter đến khi có thinking_delta đầu tiên.
-				// Nếu thinking block rỗng (adaptive decide not to think), ta sẽ bỏ hẳn
-				// cả opening lẫn closing để Cursor không hiện bubble "Thought 1s" trống.
+				// Pre-build opening delta nhưng buffer lại, chờ thinking_delta đầu tiên mới flush.
+				// Block rỗng (không có thinking_delta) sẽ drop opening → Cursor không render
+				// bubble "Thought 1s" trống.
 				index := int(root.Get("index").Int())
 
 				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator == nil {
@@ -202,7 +201,11 @@ func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, origin
 				}
 
 				nonce := generateThinkingNonce()
-				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index] = &ThinkingAccumulator{Nonce: nonce}
+				openingTemplate, _ := sjson.SetBytes(template, "choices.0.delta.content", "<!--thinking-start:"+nonce+"-->\n")
+				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index] = &ThinkingAccumulator{
+					Nonce:          nonce,
+					PendingOpening: openingTemplate,
+				}
 
 				return [][]byte{}
 			}
@@ -241,8 +244,9 @@ func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, origin
 				delete((*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator, index)
 
 				// Empty thinking block (adaptive mode decide not to think) → skip hoàn toàn.
-				// Không emit opening ở content_block_start nữa nên cũng không cần closing.
-				if !accumulator.OpeningEmitted {
+				// PendingOpening còn nguyên nghĩa là chưa có thinking_delta nào đến flush nó;
+				// drop luôn để Cursor không render bubble "Thought 1s" trống.
+				if accumulator.PendingOpening != nil {
 					return [][]byte{}
 				}
 
@@ -329,19 +333,17 @@ func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpe
 		}
 	case "thinking_delta":
 		// Thinking content delta - stream reasoning ngay lập tức.
-		// Emit opening delimiter `<!--thinking-start:NONCE-->\n` cùng chunk đầu tiên để
-		// Cursor mở thinking bubble đúng lúc. Block rỗng sẽ không emit gì (skip ở stop).
+		// Flush PendingOpening (từ content_block_start) kèm chunk đầu tiên để Cursor
+		// mở thinking bubble đúng lúc. Block rỗng sẽ không emit gì (skip ở stop).
 		if thinking := delta.Get("thinking"); thinking.Exists() {
 			index := int(root.Get("index").Int())
 			var openingChunk []byte
 			if p.ThinkingAccumulator != nil {
 				if acc, exists := p.ThinkingAccumulator[index]; exists {
 					acc.Thinking.WriteString(thinking.String())
-					if !acc.OpeningEmitted {
-						acc.OpeningEmitted = true
-						if p.deltaPrefix != "" {
-							openingChunk = []byte(p.deltaPrefix + `"<!--thinking-start:` + acc.Nonce + `-->\n"` + p.deltaSuffix)
-						}
+					if acc.PendingOpening != nil {
+						openingChunk = acc.PendingOpening
+						acc.PendingOpening = nil
 					}
 				}
 			}
