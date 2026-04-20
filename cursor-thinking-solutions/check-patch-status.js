@@ -32,6 +32,10 @@ const patches = [
     marker:
       '_d=this._aiService.getModelDetails({specificModelField:"composer"})',
   },
+  {
+    name: "OpenAI Key persistence",
+    marker: "__openaiKeyPersistencePatched:login",
+  },
 ];
 
 patches.forEach((p) => {

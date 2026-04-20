@@ -33,6 +33,7 @@ Patches cho Cursor IDE để hỗ trợ custom models qua OpenAI API proxy.
 | Summarize credentials | **Active** — cần patch | Custom OpenAI creds cho summarization |
 | Subagent credentials | **Active** — cần patch | Custom OpenAI creds cho sub-agents |
 | BugBot credentials (Agent Review) | **Experimental** | Custom OpenAI creds cho Agent Review |
+| OpenAI Key persistence | **Active** — cần patch | Giữ toggle OpenAI Key không bị auto-off |
 
 ---
 
@@ -121,6 +122,18 @@ Patch giờ thử 4 combinations (2 cancel prefix × 2 store API) và dùng đú
 
 **Lưu ý:** Server có thể ignore `model_details` cho BugBot — patch này là experimental.
 
+### 6. OpenAI Key Persistence Patch (`patch-cursor-openai-key-persistence.js`)
+
+**Vấn đề:** Toggle "OpenAI API Key" trong Settings thỉnh thoảng tự switch từ ON → OFF. Cursor có 2 listener (`loginChangedListener`, `subscriptionChangedListener`) tự gọi `setUseOpenAIKey(false)` mỗi khi refresh token hoặc poll membership. Tài khoản PRO/PRO_PLUS/ULTRA sẽ bị auto-off liên tục.
+
+**Giải pháp:** Thay body 2 listener bằng no-op. User vẫn manual toggle on/off bình thường — chỉ chặn auto-off từ auth/subscription refresh.
+
+**Search pattern (auto-detect):**
+```
+this.loginChangedListener=p=>{(this.cursorAuthenticationService.membershipType()===Ma.PRO||...PRO_PLUS||...ULTRA)&&this.setUseOpenAIKey(!1)}
+this.subscriptionChangedListener=p=>{p!==Ma.FREE&&this.setUseOpenAIKey(!1)}
+```
+
 ---
 
 ## Khi Cursor Update
@@ -190,5 +203,6 @@ Xem [CURSOR-ARCHITECTURE.md](CURSOR-ARCHITECTURE.md) cho tài liệu chi tiết 
 | `patch-cursor-summarize-credentials.js` | Patch summarize dùng custom OpenAI creds |
 | `patch-cursor-subagent-credentials.js` | Patch sub-agent dùng custom OpenAI creds |
 | `patch-cursor-bugbot-credentials.js` | Patch Agent Review dùng custom OpenAI creds (experimental) |
+| `patch-cursor-openai-key-persistence.js` | Patch giữ toggle OpenAI Key không bị auto-off |
 | `cursor_thinking-solutions.md` | Transcript of original debugging session |
 | `cursor_think_tag_loading_issue.md` | Transcript debugging loading issue |
