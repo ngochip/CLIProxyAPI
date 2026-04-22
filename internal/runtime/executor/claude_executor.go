@@ -78,12 +78,22 @@ var oauthToolRenameReverseMap = func() map[string]string {
 // even after remapping. Currently empty — all tools are mapped instead of removed.
 var oauthToolsToRemove = map[string]bool{}
 
-// oauthMcpToolPrefix prepends "mcp_" to a tool name for OAuth cloaking.
-// Unlike PascalCase conversion, this preserves the original name exactly
-// so that stripping the prefix on response gives back the original name.
-// e.g. "exec" -> "mcp_exec", "Read" -> "mcp_Read", "lcm_grep" -> "mcp_lcm_grep"
+// mcpProxyServerSlug is the synthetic MCP server slug used in cloaked tool
+// names. Anthropic's third-party detection (updated 2026-04-22) requires the
+// official Claude Code MCP format `mcp__<server>__<tool>` (double underscore
+// separators). The slug content itself is not validated by Anthropic, so any
+// stable identifier works; "proxy" makes the provenance obvious.
+const mcpProxyServerSlug = "proxy"
+
+// mcpDoubleUnderscorePrefix is the full prefix prepended to cloaked tool names.
+const mcpDoubleUnderscorePrefix = "mcp__" + mcpProxyServerSlug + "__"
+
+// oauthMcpToolPrefix wraps a tool name with the double-underscore MCP format.
+// Example: "exec" -> "mcp__proxy__exec", "lcm_grep" -> "mcp__proxy__lcm_grep".
+// The original name is preserved verbatim so that reverseMcpPrefix can recover
+// it by stripping the deterministic prefix.
 func oauthMcpToolPrefix(name string) string {
-	return "mcp_" + name
+	return mcpDoubleUnderscorePrefix + name
 }
 
 // Anthropic-compatible upstreams may reject or even crash when Claude models
@@ -1281,7 +1291,7 @@ func applyClaudeHeaders(r *http.Request, auth *cliproxyauth.Auth, apiKey string,
 		misc.EnsureHeader(r.Header, ginHeaders, "Anthropic-Dangerous-Direct-Browser-Access", "true")
 	}
 	misc.EnsureHeader(r.Header, ginHeaders, "X-App", "cli")
-	// Values below match Claude Code 2.1.63 / @anthropic-ai/sdk 0.74.0 (updated 2026-02-28).
+	// Values below match Claude Code 2.1.92 (npm stable) / @anthropic-ai/sdk 0.74.0 (updated 2026-04-22).
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Retry-Count", "0")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Runtime", "node")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Stainless-Lang", "js")
@@ -1341,7 +1351,7 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 }
 
 func checkSystemInstructions(payload []byte) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, false, false, false, "2.1.92", "", "")
 }
 
 func isClaudeOAuthToken(apiKey string) bool {
@@ -1391,9 +1401,10 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 					toolJSON = updatedTool
 					renamed = true
 				}
-			} else if !strings.HasPrefix(name, "mcp_") && oauthToolRenameMap[name] == "" {
-				// Unknown tool not in rename map: add mcp_ prefix so Anthropic
-				// treats it as a Claude Code MCP tool (avoids 10-tool threshold).
+			} else if !strings.HasPrefix(name, "mcp__") && oauthToolRenameMap[name] == "" {
+				// Unknown tool not in rename map: wrap in the official Claude
+				// Code MCP format `mcp__<server>__<tool>` so Anthropic treats
+				// it as an MCP tool (required since 2026-04-22).
 				mcpName := oauthMcpToolPrefix(name)
 				updatedTool, err := sjson.Set(toolJSON, "name", mcpName)
 				if err == nil {
@@ -1422,7 +1433,7 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 		} else if newName, ok := oauthToolRenameMap[tcName]; ok && newName != tcName {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", newName)
 			renamed = true
-		} else if !strings.HasPrefix(tcName, "mcp_") && oauthToolRenameMap[tcName] == "" {
+		} else if !strings.HasPrefix(tcName, "mcp__") && oauthToolRenameMap[tcName] == "" {
 			body, _ = sjson.SetBytes(body, "tool_choice.name", oauthMcpToolPrefix(tcName))
 			renamed = true
 		}
@@ -1445,7 +1456,7 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
 						renamed = true
-					} else if !strings.HasPrefix(name, "mcp_") && oauthToolRenameMap[name] == "" {
+					} else if !strings.HasPrefix(name, "mcp__") && oauthToolRenameMap[name] == "" {
 						path := fmt.Sprintf("messages.%d.content.%d.name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, oauthMcpToolPrefix(name))
 						renamed = true
@@ -1456,7 +1467,7 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, newName)
 						renamed = true
-					} else if !strings.HasPrefix(toolName, "mcp_") && oauthToolRenameMap[toolName] == "" {
+					} else if !strings.HasPrefix(toolName, "mcp__") && oauthToolRenameMap[toolName] == "" {
 						path := fmt.Sprintf("messages.%d.content.%d.tool_name", msgIndex.Int(), contentIndex.Int())
 						body, _ = sjson.SetBytes(body, path, oauthMcpToolPrefix(toolName))
 						renamed = true
@@ -1474,7 +1485,7 @@ func remapOAuthToolNames(body []byte) ([]byte, bool) {
 								if newName, ok := oauthToolRenameMap[nestedToolName]; ok && newName != nestedToolName {
 									body, _ = sjson.SetBytes(body, nestedPath, newName)
 									renamed = true
-								} else if !strings.HasPrefix(nestedToolName, "mcp_") && oauthToolRenameMap[nestedToolName] == "" {
+								} else if !strings.HasPrefix(nestedToolName, "mcp__") && oauthToolRenameMap[nestedToolName] == "" {
 									body, _ = sjson.SetBytes(body, nestedPath, oauthMcpToolPrefix(nestedToolName))
 									renamed = true
 								}
@@ -1527,16 +1538,26 @@ func reverseRemapOAuthToolNames(body []byte) []byte {
 	return body
 }
 
-// reverseMcpPrefix strips the "mcp_" prefix to recover the original tool name.
-// Returns empty string if the name doesn't have mcp_ prefix or is a static mapping.
+// reverseMcpPrefix strips the double-underscore MCP prefix to recover the
+// original tool name. The expected format is `mcp__<server>__<tool>`; any
+// server slug is accepted so that responses generated with a different slug
+// (for example if the upstream MCP server was renamed) still round-trip
+// correctly.
+// Returns empty string if the name does not match the format or is a static
+// Claude Code rename target.
 func reverseMcpPrefix(name string) string {
-	if !strings.HasPrefix(name, "mcp_") {
+	if !strings.HasPrefix(name, "mcp__") {
 		return ""
 	}
 	if _, isStatic := oauthToolRenameReverseMap[name]; isStatic {
 		return ""
 	}
-	orig := name[4:]
+	rest := name[len("mcp__"):]
+	sep := strings.Index(rest, "__")
+	if sep < 0 {
+		return ""
+	}
+	orig := rest[sep+2:]
 	if orig == "" {
 		return ""
 	}
@@ -1913,7 +1934,7 @@ func generateBillingHeader(payload []byte, experimentalCCHSigning bool, version,
 }
 
 func checkSystemInstructionsWithMode(payload []byte, strictMode bool) []byte {
-	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.63", "", "")
+	return checkSystemInstructionsWithSigningMode(payload, strictMode, false, false, "2.1.92", "", "")
 }
 
 // checkSystemInstructionsWithSigningMode injects Claude Code-style system blocks:

@@ -40,7 +40,7 @@ HEADERS = {
     "Anthropic-Version": "2023-06-01",
     "Authorization": f"Bearer {OAUTH_TOKEN}",
     "Content-Type": "application/json",
-    "User-Agent": "claude-cli/2.1.63 (external, cli)",
+    "User-Agent": "claude-cli/2.1.92 (external, cli)",
     "X-App": "cli",
     "X-Claude-Code-Session-Id": str(uuid.uuid4()),
     "X-Client-Request-Id": str(uuid.uuid4()),
@@ -58,7 +58,7 @@ HEADERS = {
 # --- Billing header computation (matching proxy's generateBillingHeader) ---
 CCH_SALT = "59cf53e54c78"
 CCH_POSITIONS = [4, 7, 20]
-CC_VERSION = "2.1.87"
+CC_VERSION = "2.1.92"
 CC_ENTRYPOINT = "sdk-cli"
 
 
@@ -399,6 +399,38 @@ MCP tools via: npx mcp-cli call <server>.<tool> <args>
     scrubbed_tools = json.loads(stage34_scrub(json.dumps(tools)))
     body = build_request(user_text, system_reminder=sanitized_full, tools=scrubbed_tools)
     results.append(run_test("14. Full sanitize + tools descriptions scrubbed", body))
+    time.sleep(DELAY_BETWEEN_TESTS)
+
+    # ==========================================
+    # TEST 15: Tool naming format - single vs double underscore
+    # ==========================================
+    # Anthropic (since 2026-04-22) requires the official Claude Code MCP format
+    # `mcp__<server>__<tool>`. The older single-underscore form `mcp_<name>`
+    # is rejected when tool count exceeds the threshold (>=10).
+    base_tool_names = [
+        "exec", "process", "browser", "image_generate", "video_generate",
+        "agents_list", "sessions_list", "sessions_history", "sessions_spawn",
+        "web_search", "web_fetch", "memory_search",
+    ]
+
+    def make_tools(prefix_fn):
+        return [
+            {
+                "name": prefix_fn(n),
+                "description": "short",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+            for n in base_tool_names
+        ]
+
+    single = make_tools(lambda n: f"mcp_{n}")
+    body = build_request(user_text, tools=single)
+    results.append(run_test("15a. Single-underscore mcp_<name> (should FAIL)", body))
+    time.sleep(DELAY_BETWEEN_TESTS)
+
+    double = make_tools(lambda n: f"mcp__proxy__{n}")
+    body = build_request(user_text, tools=double)
+    results.append(run_test("15b. Double-underscore mcp__proxy__<name> (should PASS)", body))
     time.sleep(DELAY_BETWEEN_TESTS)
 
     # ==========================================

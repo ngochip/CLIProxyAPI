@@ -8,7 +8,8 @@ import (
 )
 
 func TestReverseRemapResponse(t *testing.T) {
-	// Simulate Claude response with tool_use blocks using mcp_ prefixed names
+	// Simulate Claude response with tool_use blocks using mcp__<server>__<tool>
+	// format names (the format Anthropic mandates since 2026-04-22).
 	response := map[string]interface{}{
 		"content": []map[string]interface{}{
 			{
@@ -18,7 +19,7 @@ func TestReverseRemapResponse(t *testing.T) {
 			{
 				"type":  "tool_use",
 				"id":    "toolu_123",
-				"name":  "mcp_exec",
+				"name":  "mcp__proxy__exec",
 				"input": map[string]interface{}{"command": "ls"},
 			},
 		},
@@ -32,24 +33,27 @@ func TestReverseRemapResponse(t *testing.T) {
 		t.Errorf("expected 'exec', got %q", name)
 	}
 
-	// Test with various tool names
+	// Test with various tool names (double-underscore format).
 	testCases := []struct {
 		mcpName  string
 		wantName string
 	}{
-		{"mcp_exec", "exec"},
-		{"mcp_process", "process"},
-		{"mcp_agents_list", "agents_list"},
-		{"mcp_lcm_grep", "lcm_grep"},
-		{"mcp_lcm_expand_query", "lcm_expand_query"},
-		{"mcp_web_search", "web_search"},
-		{"mcp_browser", "browser"},
-		{"mcp_graphiti_search", "graphiti_search"},
-		{"mcp_sessions_spawn", "sessions_spawn"},
-		{"mcp_canvas", "canvas"},
-		{"mcp_tts", "tts"},
-		{"mcp_Read", "Read"},
-		{"mcp_Write", "Write"},
+		{"mcp__proxy__exec", "exec"},
+		{"mcp__proxy__process", "process"},
+		{"mcp__proxy__agents_list", "agents_list"},
+		{"mcp__proxy__lcm_grep", "lcm_grep"},
+		{"mcp__proxy__lcm_expand_query", "lcm_expand_query"},
+		{"mcp__proxy__web_search", "web_search"},
+		{"mcp__proxy__browser", "browser"},
+		{"mcp__proxy__graphiti_search", "graphiti_search"},
+		{"mcp__proxy__sessions_spawn", "sessions_spawn"},
+		{"mcp__proxy__canvas", "canvas"},
+		{"mcp__proxy__tts", "tts"},
+		{"mcp__proxy__Read", "Read"},
+		{"mcp__proxy__Write", "Write"},
+		// Different server slugs must also reverse correctly (robustness).
+		{"mcp__openclaw__exec", "exec"},
+		{"mcp__server1__agents_list", "agents_list"},
 	}
 
 	for _, tc := range testCases {

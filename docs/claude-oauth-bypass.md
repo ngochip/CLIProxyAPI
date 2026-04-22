@@ -1,6 +1,6 @@
 # Claude OAuth Third-Party Detection Bypass
 
-Last updated: 2026-04-15
+Last updated: 2026-04-22
 Tested against: Claude API (api.anthropic.com), Claude Sonnet 4.6
 
 ## Background
@@ -20,27 +20,35 @@ or the older variant:
 
 The proxy must disguise requests to appear as Claude Code (Anthropic's official CLI).
 
-## Detection Vectors (tested 2026-04-15, 77 API calls)
+## Detection Vectors
 
 ### 1. TOOLS — Primary Detection Vector
 
-**Rule: Requests with >= 10 tools that lack `mcp_` prefix are blocked.**
+**Rule (since 2026-04-22): tool names must follow the official Claude Code MCP
+format `mcp__<server>__<tool>` (double underscore separators) once tool count
+reaches Anthropic's threshold.**
+
+The server slug content is **not** validated — any stable identifier such as
+`proxy`, `openclaw`, or `server1` is accepted. The tool slug is also
+unrestricted. What matters is the exact shape: `mcp__` + segment + `__` +
+segment.
 
 | Scenario | Result |
 |----------|--------|
 | 0 tools | PASS |
 | 9 bare-name tools (e.g. `agents_list`, `exec`) | PASS |
-| 10 bare-name tools | **FAIL** |
-| 37 bare-name tools | **FAIL** |
-| 50 generic tools (`tool_0` ... `tool_49`) | PASS |
-| 37 tools with `mcp_` prefix (`mcp_AgentsList`) | PASS |
-| 20 `mcp_` tools only | PASS |
-| Claude Code tools (`Read`, `Write`, `Bash`) + `mcp_` custom | PASS |
+| 12 bare-name tools | **FAIL** |
+| 12 tools with legacy single-underscore `mcp_<name>` | **FAIL** |
+| 12 tools with `mcp__proxy__<name>` (double underscore) | **PASS** |
+| 12 tools with `mcp__openclaw__<name>` (any server slug) | **PASS** |
+| 35 tools with `mcp__proxy__<name>` | **PASS** |
 | Individual tool names (any name, alone) | Always PASS |
 
-**Key insight:** Generic tool names like `tool_0` pass even at 50 count.
-The detection specifically targets tool names that **look like third-party MCP tools
-but don't use Claude Code's `mcp_PascalCase` naming convention**.
+**Key change (2026-04-22):** the older single-underscore prefix `mcp_<name>`
+that used to bypass detection no longer works. Anthropic now requires the
+exact Claude Code MCP naming scheme. Brand keywords inside
+`tools[].description` are **not** a detection vector on their own — only the
+tool `name` shape is fingerprinted.
 
 ### 2. System Prompt — NOT a Detection Vector
 
@@ -60,10 +68,15 @@ good practice as Anthropic may add prompt-based detection in the future.
 These headers must be present (proxy already sets them):
 
 ```
-User-Agent: claude-cli/2.1.63 (external, cli)
+User-Agent: claude-cli/2.1.92 (external, cli)
 Anthropic-Beta: claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14
 X-App: cli
 ```
+
+The default Claude Code version baseline was bumped from `2.1.63` to `2.1.92`
+on 2026-04-22 to match the current npm `stable` tag. Version itself is not a
+detection vector in isolation, but staying close to the latest release avoids
+issues if Anthropic adds a min-version check in the future.
 
 ### 4. Billing Header — Required
 
@@ -102,8 +115,9 @@ Request arrives
   -> applyClaudeToolPrefix() [empty prefix, no-op]
   -> remapOAuthToolNames()
       -> Rename known tools (oauthToolRenameMap): bash->Bash, read->Read, etc.
-      -> NEW: Prefix unknown tools with mcp_ + PascalCase
-         e.g. agents_list -> mcp_AgentsList, lcm_grep -> mcp_LcmGrep
+      -> Wrap unknown tools in official Claude Code MCP format
+         mcp__proxy__<orig>, e.g. agents_list -> mcp__proxy__agents_list,
+         lcm_grep -> mcp__proxy__lcm_grep
   -> signAnthropicMessagesBody() [xxHash64 CCH signing]
   -> Send to api.anthropic.com/v1/messages?beta=true
 ```
@@ -152,9 +166,12 @@ grep -o '"name":"[^"]*"' logs/request-*.log | sort -u
 
 All tool names should either:
 - Be known Claude Code tools: `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, etc.
-- Have `mcp_` prefix: `mcp_AgentsList`, `mcp_LcmGrep`, etc.
+- Follow the official MCP format `mcp__<server>__<tool>`:
+  `mcp__proxy__agents_list`, `mcp__proxy__lcm_grep`, etc.
 
-If you see bare names like `agents_list`, `lcm_grep` — the mcp_ prefix is not being applied.
+If you see bare names like `agents_list`, `lcm_grep` — or legacy
+`mcp_<name>` single-underscore names — the new double-underscore prefix is
+not being applied.
 
 ### Step 4: Verify headers
 
@@ -207,3 +224,5 @@ in the Phase 2-5 tests (deleted but documented above). Key approaches:
 | 2026-04-15 | Initial investigation | Tools >= 10 without `mcp_` prefix |
 | 2026-04-15 | Added mcp_ auto-prefix | `remapOAuthToolNames()` now prefixes unknown tools |
 | 2026-04-15 | Added prompt sanitization | 4-stage system prompt scrubbing (defense in depth) |
+| 2026-04-22 | Switched to double-underscore MCP format | Anthropic now requires `mcp__<server>__<tool>`; single-underscore `mcp_<name>` is rejected upstream. 13 probes confirmed: brand keywords in `tools[].description` are NOT a detection vector, only tool `name` shape matters. |
+| 2026-04-22 | Bumped default cc_version/User-Agent | `2.1.63` → `2.1.92` (npm stable) as hygiene; not a detection vector on its own. |
