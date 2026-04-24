@@ -854,7 +854,13 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
-	// Use the baseModel to get the provider name
+	if strings.EqualFold(baseModel, "gpt-image-2") {
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusServiceUnavailable,
+			Error:      fmt.Errorf("model %s is only supported on /v1/images/generations and /v1/images/edits", baseModel),
+		}
+	}
+
 	providers = util.GetProviderName(baseModel)
 
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,
