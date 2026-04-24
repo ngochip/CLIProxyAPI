@@ -12,9 +12,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf16"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
@@ -219,7 +222,7 @@ func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, origin
 		if (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator != nil {
 			if accumulator, exists := (*param).(*ConvertAnthropicResponseToOpenAIParams).ToolCallsAccumulator[index]; exists {
 				// Build complete tool call with accumulated arguments
-				arguments := accumulator.Arguments.String()
+				arguments := normalizeUnicodeEscapes(accumulator.Arguments.String())
 				if arguments == "" {
 					arguments = "{}"
 				}
@@ -357,8 +360,8 @@ func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpe
 // Fast path: concat pre-built prefix/suffix when available (message_start already seen).
 // Fallback: build full template via sjson when deltaPrefix is empty (missed message_start).
 func buildDeltaChunk(p *ConvertAnthropicResponseToOpenAIParams, val gjson.Result) []byte {
-	// Normalize: decode \uXXXX -> UTF-8, then re-encode as JSON string (always raw UTF-8)
-	normalized, _ := json.Marshal(val.String())
+	// Normalize: decode \uXXXX -> UTF-8, fix literal uXXXX from model, re-encode as JSON string
+	normalized, _ := json.Marshal(normalizeUnicodeEscapes(val.String()))
 
 	if p.deltaPrefix != "" {
 		result := make([]byte, 0, len(p.deltaPrefix)+len(normalized)+len(p.deltaSuffix))
@@ -380,6 +383,56 @@ func buildDeltaChunk(p *ConvertAnthropicResponseToOpenAIParams, val gjson.Result
 	}
 	template, _ = sjson.SetRawBytes(template, "choices.0.delta.content", normalized)
 	return template
+}
+
+// reSurrogatePair matches literal surrogate pairs: uD800-uDBFF followed by uDC00-uDFFF
+var reSurrogatePair = regexp.MustCompile(`u([dD][89aAbB][0-9a-fA-F]{2})u([dD][cCdDeEfF][0-9a-fA-F]{2})`)
+
+// reBMPEscape matches literal "uXXXX" BMP codepoints (non-surrogate, non-ASCII-letter range)
+var reBMPEscape = regexp.MustCompile(`u([0-9a-fA-F]{4})`)
+
+// normalizeUnicodeEscapes fixes Claude model bug where tool call arguments contain
+// literal "uXXXX" text (e.g. "ud83dudd0d", "u1ec7") instead of actual UTF-8 chars.
+// Xử lý surrogate pairs trước (emoji), rồi BMP codepoints sau (Vietnamese, symbols).
+func normalizeUnicodeEscapes(s string) string {
+	if !reBMPEscape.MatchString(s) {
+		return s
+	}
+
+	// Phase 1: surrogate pairs → emoji (ud83dudd0d → 🔍)
+	result := reSurrogatePair.ReplaceAllStringFunc(s, func(match string) string {
+		parts := reSurrogatePair.FindStringSubmatch(match)
+		if len(parts) != 3 {
+			return match
+		}
+		hi, err1 := strconv.ParseUint(parts[1], 16, 16)
+		lo, err2 := strconv.ParseUint(parts[2], 16, 16)
+		if err1 != nil || err2 != nil {
+			return match
+		}
+		r := utf16.DecodeRune(rune(hi), rune(lo))
+		if r == unicode.ReplacementChar {
+			return match
+		}
+		return string(r)
+	})
+
+	// Phase 2: BMP codepoints → UTF-8 (u1ec7 → ệ, u00f3 → ó, u0110 → Đ)
+	result = reBMPEscape.ReplaceAllStringFunc(result, func(match string) string {
+		cp, err := strconv.ParseUint(match[1:], 16, 32)
+		if err != nil {
+			return match
+		}
+		r := rune(cp)
+		// Không convert ASCII printable range (u0020-u007e) vì có thể là text thường
+		// và surrogate orphans đã bị consume ở phase 1
+		if r < 0x0080 || utf16.IsSurrogate(r) {
+			return match
+		}
+		return string(r)
+	})
+
+	return result
 }
 
 // mapAnthropicStopReasonToOpenAI maps Anthropic stop reasons to OpenAI stop reasons
@@ -537,7 +590,7 @@ func ConvertClaudeResponseToOpenAINonStream(ctx context.Context, modelName strin
 	out, _ = sjson.SetBytes(out, "model", model)
 
 	// Set message content by combining all text parts
-	messageContent := strings.Join(contentParts, "")
+	messageContent := normalizeUnicodeEscapes(strings.Join(contentParts, ""))
 	out, _ = sjson.SetBytes(out, "choices.0.message.content", messageContent)
 
 	// Set tool calls if any were accumulated during processing
@@ -556,7 +609,7 @@ func ConvertClaudeResponseToOpenAINonStream(ctx context.Context, modelName strin
 				continue
 			}
 
-			arguments := accumulator.Arguments.String()
+			arguments := normalizeUnicodeEscapes(accumulator.Arguments.String())
 
 			idPath := fmt.Sprintf("choices.0.message.tool_calls.%d.id", toolCallsCount)
 			typePath := fmt.Sprintf("choices.0.message.tool_calls.%d.type", toolCallsCount)

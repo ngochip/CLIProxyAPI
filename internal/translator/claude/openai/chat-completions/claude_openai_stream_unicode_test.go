@@ -180,3 +180,89 @@ func TestStreamUnicode_EscapeNormalizedToUTF8(t *testing.T) {
 		t.Errorf("output should contain raw UTF-8 'Đang': %s", last)
 	}
 }
+
+// === Tests cho normalizeUnicodeEscapes ===
+
+func TestNormalizeUnicodeEscapes_SurrogatePair(t *testing.T) {
+	// ud83dudd0d = 🔍 (MAGNIFYING GLASS)
+	input := `ud83dudd0d hello`
+	got := normalizeUnicodeEscapes(input)
+	if got != "🔍 hello" {
+		t.Errorf("surrogate pair: expected %q, got %q", "🔍 hello", got)
+	}
+}
+
+func TestNormalizeUnicodeEscapes_PackageEmoji(t *testing.T) {
+	// ud83dudce6 = 📦 (PACKAGE)
+	input := `ud83dudce6 Shipped`
+	got := normalizeUnicodeEscapes(input)
+	if got != "📦 Shipped" {
+		t.Errorf("package emoji: expected %q, got %q", "📦 Shipped", got)
+	}
+}
+
+func TestNormalizeUnicodeEscapes_Vietnamese(t *testing.T) {
+	// u1ec7 = ệ, u00f3 = ó, u0110 = Đ, u01b0 = ư, u1ea3 = ả
+	input := `hiu1ec7n cu00f3 u0110ang chu01b0a bu1ea3n`
+	got := normalizeUnicodeEscapes(input)
+	expected := "hiện có Đang chưa bản"
+	if got != expected {
+		t.Errorf("vietnamese: expected %q, got %q", expected, got)
+	}
+}
+
+func TestNormalizeUnicodeEscapes_Mixed(t *testing.T) {
+	// Trường hợp thực tế từ prod log
+	input := `ud83dudd0d ` + "`warp-nodejs-biz-route`" + ` hiu1ec7n v0.3.163, cu00f3 1 commit mu1edbi chu01b0a publish. u0110ang build vu00e0 publish phiu00ean bu1ea3n mu1edbi...`
+	got := normalizeUnicodeEscapes(input)
+	if !bytes.Contains([]byte(got), []byte("🔍")) {
+		t.Errorf("mixed: should contain 🔍, got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("hiện")) {
+		t.Errorf("mixed: should contain 'hiện', got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("Đang")) {
+		t.Errorf("mixed: should contain 'Đang', got %q", got)
+	}
+	if bytes.Contains([]byte(got), []byte("u1ec7")) {
+		t.Errorf("mixed: should NOT contain literal 'u1ec7', got %q", got)
+	}
+}
+
+func TestNormalizeUnicodeEscapes_NoChange(t *testing.T) {
+	// Không match pattern nào
+	input := `hello world 123`
+	got := normalizeUnicodeEscapes(input)
+	if got != input {
+		t.Errorf("no-change: expected %q, got %q", input, got)
+	}
+}
+
+func TestNormalizeUnicodeEscapes_URL(t *testing.T) {
+	// URL chứa "u" + hex — không nên bị convert nếu < 0x80
+	input := `https://example.com/u0041path`
+	got := normalizeUnicodeEscapes(input)
+	// u0041 = 'A' nhưng < 0x80 nên giữ nguyên
+	if got != input {
+		t.Errorf("url: expected %q (unchanged), got %q", input, got)
+	}
+}
+
+func TestNormalizeUnicodeEscapes_ToolCallJSON(t *testing.T) {
+	// Simulate full tool call arguments JSON
+	input := `{"action": "send", "channel": "slack", "message": "ud83dudce6 Bu1eaft u0111u1ea7u deploy"}`
+	got := normalizeUnicodeEscapes(input)
+	if !bytes.Contains([]byte(got), []byte("📦")) {
+		t.Errorf("tool-call: should contain 📦, got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("Bắt")) {
+		t.Errorf("tool-call: should contain 'Bắt', got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("đầu")) {
+		t.Errorf("tool-call: should contain 'đầu', got %q", got)
+	}
+	// Phải vẫn là valid JSON structure
+	if !gjson.Valid(got) {
+		t.Errorf("tool-call: result should be valid JSON, got %q", got)
+	}
+}
