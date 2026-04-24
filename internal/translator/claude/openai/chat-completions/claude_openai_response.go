@@ -317,7 +317,7 @@ func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpe
 	switch delta.Get("type").String() {
 	case "text_delta":
 		if text := delta.Get("text"); text.Exists() {
-			return [][]byte{buildDeltaChunk(p, text.Raw)}
+			return [][]byte{buildDeltaChunk(p, text)}
 		}
 	case "thinking_delta":
 		if thinking := delta.Get("thinking"); thinking.Exists() {
@@ -327,7 +327,7 @@ func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpe
 					acc.Thinking.WriteString(thinking.String())
 				}
 			}
-			return [][]byte{buildDeltaChunk(p, thinking.Raw)}
+			return [][]byte{buildDeltaChunk(p, thinking)}
 		}
 	case "signature_delta":
 		if signature := delta.Get("signature"); signature.Exists() {
@@ -351,12 +351,20 @@ func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpe
 	return [][]byte{}
 }
 
-// buildDeltaChunk constructs an OpenAI streaming chunk from a raw JSON content value.
+// buildDeltaChunk constructs an OpenAI streaming chunk from a gjson content value.
+// Normalizes \uXXXX escapes to raw UTF-8 via json.Marshal(val.String()) so output
+// is consistent regardless of upstream encoding.
 // Fast path: concat pre-built prefix/suffix when available (message_start already seen).
 // Fallback: build full template via sjson when deltaPrefix is empty (missed message_start).
-func buildDeltaChunk(p *ConvertAnthropicResponseToOpenAIParams, rawContent string) []byte {
+func buildDeltaChunk(p *ConvertAnthropicResponseToOpenAIParams, val gjson.Result) []byte {
+	// Normalize: decode \uXXXX -> UTF-8, then re-encode as JSON string (always raw UTF-8)
+	normalized, _ := json.Marshal(val.String())
+
 	if p.deltaPrefix != "" {
-		result := []byte(p.deltaPrefix + rawContent + p.deltaSuffix)
+		result := make([]byte, 0, len(p.deltaPrefix)+len(normalized)+len(p.deltaSuffix))
+		result = append(result, p.deltaPrefix...)
+		result = append(result, normalized...)
+		result = append(result, p.deltaSuffix...)
 		if gjson.ValidBytes(result) {
 			return result
 		}
@@ -370,7 +378,7 @@ func buildDeltaChunk(p *ConvertAnthropicResponseToOpenAIParams, rawContent strin
 	if p.CreatedAt > 0 {
 		template, _ = sjson.SetBytes(template, "created", p.CreatedAt)
 	}
-	template, _ = sjson.SetRawBytes(template, "choices.0.delta.content", []byte(rawContent))
+	template, _ = sjson.SetRawBytes(template, "choices.0.delta.content", normalized)
 	return template
 }
 
