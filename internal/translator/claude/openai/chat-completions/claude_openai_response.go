@@ -100,9 +100,17 @@ func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, origin
 	}
 
 	if !bytes.HasPrefix(rawJSON, dataTag) {
+		if len(bytes.TrimSpace(rawJSON)) > 0 {
+			log.Debugf("SSE line skipped (no data: prefix): %q", rawJSON)
+		}
 		return [][]byte{}
 	}
 	rawJSON = bytes.TrimSpace(rawJSON[5:])
+
+	if !gjson.ValidBytes(rawJSON) {
+		log.Debugf("invalid JSON in upstream SSE frame: %q", rawJSON)
+		return [][]byte{}
+	}
 
 	root := gjson.ParseBytes(rawJSON)
 	eventType := root.Get("type").String()
@@ -185,18 +193,18 @@ func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, origin
 
 				// Don't output anything yet - wait for complete tool call
 				return [][]byte{}
-		} else if blockType == "thinking" {
-			index := int(root.Get("index").Int())
+			} else if blockType == "thinking" {
+				index := int(root.Get("index").Int())
 
-			if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator == nil {
-				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator = make(map[int]*ThinkingAccumulator)
-			}
+				if (*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator == nil {
+					(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator = make(map[int]*ThinkingAccumulator)
+				}
 
-			nonce := generateThinkingNonce()
-			(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index] = &ThinkingAccumulator{Nonce: nonce}
+				nonce := generateThinkingNonce()
+				(*param).(*ConvertAnthropicResponseToOpenAIParams).ThinkingAccumulator[index] = &ThinkingAccumulator{Nonce: nonce}
 
-			template, _ = sjson.SetBytes(template, "choices.0.delta.content", "<!--thinking-start:"+nonce+"-->\n")
-			return [][]byte{template}
+				template, _ = sjson.SetBytes(template, "choices.0.delta.content", "<!--thinking-start:"+nonce+"-->\n")
+				return [][]byte{template}
 			}
 		}
 		return [][]byte{}
@@ -297,8 +305,9 @@ func ConvertClaudeResponseToOpenAI(ctx context.Context, modelName string, origin
 	}
 }
 
-// handleContentBlockDelta xử lý content_block_delta events với fast-path optimization.
-// Dùng pre-built JSON prefix/suffix + gjson Raw value để tránh sjson.Set overhead per delta.
+// handleContentBlockDelta processes content_block_delta events with fast-path optimization.
+// Uses pre-built JSON prefix/suffix + gjson Raw value to avoid sjson.Set overhead per delta.
+// Falls back to sjson.SetRawBytes when deltaPrefix is empty (e.g. missed message_start).
 func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpenAIParams) [][]byte {
 	delta := root.Get("delta")
 	if !delta.Exists() {
@@ -307,29 +316,20 @@ func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpe
 
 	switch delta.Get("type").String() {
 	case "text_delta":
-		// Text content delta - gửi incremental text updates
 		if text := delta.Get("text"); text.Exists() {
-			if p.deltaPrefix != "" {
-				return [][]byte{[]byte(p.deltaPrefix + text.Raw + p.deltaSuffix)}
-			}
+			return [][]byte{buildDeltaChunk(p, text.Raw)}
 		}
 	case "thinking_delta":
-		// Thinking content delta - stream reasoning ngay lập tức
 		if thinking := delta.Get("thinking"); thinking.Exists() {
-			// Accumulate thinking text cho cache signature ở content_block_stop
 			index := int(root.Get("index").Int())
 			if p.ThinkingAccumulator != nil {
 				if acc, exists := p.ThinkingAccumulator[index]; exists {
 					acc.Thinking.WriteString(thinking.String())
 				}
 			}
-			// Dùng pre-built prefix/suffix + Raw JSON (đã escape sẵn) → zero-parse construction
-			if p.deltaPrefix != "" {
-				return [][]byte{[]byte(p.deltaPrefix + thinking.Raw + p.deltaSuffix)}
-			}
+			return [][]byte{buildDeltaChunk(p, thinking.Raw)}
 		}
 	case "signature_delta":
-		// Accumulate signature cho thinking block
 		if signature := delta.Get("signature"); signature.Exists() {
 			index := int(root.Get("index").Int())
 			if p.ThinkingAccumulator != nil {
@@ -339,7 +339,6 @@ func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpe
 			}
 		}
 	case "input_json_delta":
-		// Tool use input delta - accumulate arguments cho tool calls
 		if partialJSON := delta.Get("partial_json"); partialJSON.Exists() {
 			index := int(root.Get("index").Int())
 			if p.ToolCallsAccumulator != nil {
@@ -350,6 +349,29 @@ func handleContentBlockDelta(root gjson.Result, p *ConvertAnthropicResponseToOpe
 		}
 	}
 	return [][]byte{}
+}
+
+// buildDeltaChunk constructs an OpenAI streaming chunk from a raw JSON content value.
+// Fast path: concat pre-built prefix/suffix when available (message_start already seen).
+// Fallback: build full template via sjson when deltaPrefix is empty (missed message_start).
+func buildDeltaChunk(p *ConvertAnthropicResponseToOpenAIParams, rawContent string) []byte {
+	if p.deltaPrefix != "" {
+		result := []byte(p.deltaPrefix + rawContent + p.deltaSuffix)
+		if gjson.ValidBytes(result) {
+			return result
+		}
+		log.Debugf("fast-path delta produced invalid JSON, falling back to sjson builder")
+	}
+
+	template := []byte(`{"id":"","object":"chat.completion.chunk","created":0,"model":"","choices":[{"index":0,"delta":{"content":""},"finish_reason":null}]}`)
+	if p.ResponseID != "" {
+		template, _ = sjson.SetBytes(template, "id", p.ResponseID)
+	}
+	if p.CreatedAt > 0 {
+		template, _ = sjson.SetBytes(template, "created", p.CreatedAt)
+	}
+	template, _ = sjson.SetRawBytes(template, "choices.0.delta.content", []byte(rawContent))
+	return template
 }
 
 // mapAnthropicStopReasonToOpenAI maps Anthropic stop reasons to OpenAI stop reasons

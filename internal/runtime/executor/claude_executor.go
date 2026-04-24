@@ -581,7 +581,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			scanner := bufio.NewScanner(decodedBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			for scanner.Scan() {
-				line := scanner.Bytes()
+				line := bytes.TrimRight(scanner.Bytes(), "\r")
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 					reporter.Publish(ctx, detail)
@@ -610,7 +610,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
 		for scanner.Scan() {
-			line := scanner.Bytes()
+			line := bytes.TrimRight(scanner.Bytes(), "\r")
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			if detail, ok := helps.ParseClaudeStreamUsage(line); ok {
 				reporter.Publish(ctx, detail)
