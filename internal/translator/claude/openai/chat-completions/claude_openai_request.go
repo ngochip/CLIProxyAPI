@@ -553,7 +553,7 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 	// with a thinking block (preceeding the lastmost set of tool_use and tool_result blocks)"
 	out = []byte(ensureAssistantThinkingBlock(string(out)))
 
-	// Apply explicit cache_control breakpoints (tools 1h, system 1h, second-to-last user 5m)
+	// Apply explicit cache_control breakpoints (tools, system, last 2 user messages)
 	out = []byte(applyCacheControlMarkers(string(out)))
 
 	// Add top-level cache_control for automatic caching: Anthropic auto-applies
