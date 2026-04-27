@@ -558,8 +558,9 @@ func ConvertOpenAIRequestToClaude(modelName string, inputRawJSON []byte, stream 
 
 	// Add top-level cache_control for automatic caching: Anthropic auto-applies
 	// a breakpoint to the last cacheable block and advances it as conversation grows.
+	// TTL must match the explicit breakpoints (1h) to avoid conflict.
 	if !gjson.GetBytes(out, "cache_control").Exists() {
-		out, _ = sjson.SetBytes(out, "cache_control", map[string]string{"type": "ephemeral"})
+		out, _ = sjson.SetBytes(out, "cache_control", map[string]string{"type": "ephemeral", "ttl": "1h"})
 	}
 
 	return out
