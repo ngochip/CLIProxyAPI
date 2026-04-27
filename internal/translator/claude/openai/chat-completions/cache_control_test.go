@@ -56,6 +56,19 @@ func TestApplyCacheControlMarkers_AllSections(t *testing.T) {
 	if gjson.Get(result, "messages.0.content.0.cache_control").Exists() {
 		t.Error("earlier messages should NOT have cache_control")
 	}
+
+	// All breakpoints should have 1h TTL
+	ttlPaths := []string{
+		"system.0.cache_control.ttl",
+		"system.1.cache_control.ttl",
+		"messages.3.content.0.cache_control.ttl",
+		"messages.4.content.0.cache_control.ttl",
+	}
+	for _, path := range ttlPaths {
+		if gjson.Get(result, path).String() != "1h" {
+			t.Errorf("path %q should have ttl=1h", path)
+		}
+	}
 }
 
 func TestApplyCacheControlMarkers_AssistantMessageCached(t *testing.T) {
@@ -116,9 +129,8 @@ func TestApplyCacheControlMarkers_TwoSystemFirstCached(t *testing.T) {
 	}
 }
 
-func TestApplyCacheControlMarkers_NoTTL1h(t *testing.T) {
+func TestApplyCacheControlMarkers_TTL1h(t *testing.T) {
 	input := `{
-		"tools": [{"name": "tool1", "description": "Tool", "input_schema": {"type": "object"}}],
 		"system": [{"type": "text", "text": "System prompt"}],
 		"messages": [
 			{"role": "user", "content": [{"type": "text", "text": "Q1"}]},
@@ -129,18 +141,16 @@ func TestApplyCacheControlMarkers_NoTTL1h(t *testing.T) {
 
 	result := applyCacheControlMarkers(input)
 
-	// Walk all possible cache_control locations and verify no 1h TTL
+	// All cache_control blocks should have ttl=1h
 	paths := []string{
-		"tools.0.cache_control.ttl",
 		"system.0.cache_control.ttl",
-		"messages.0.content.0.cache_control.ttl",
 		"messages.1.content.0.cache_control.ttl",
 		"messages.2.content.0.cache_control.ttl",
 	}
 	for _, path := range paths {
 		val := gjson.Get(result, path)
-		if val.Exists() && val.String() == "1h" {
-			t.Errorf("path %q should NOT have ttl=1h", path)
+		if !val.Exists() || val.String() != "1h" {
+			t.Errorf("path %q should have ttl=1h, got %q", path, val.String())
 		}
 	}
 }
@@ -196,9 +206,12 @@ func TestApplyCacheControlMarkers_StringSystem(t *testing.T) {
 
 	result := applyCacheControlMarkers(input)
 
-	// String system should be converted to array with cache_control
+	// String system should be converted to array with cache_control + 1h TTL
 	if gjson.Get(result, "system.0.cache_control.type").String() != "ephemeral" {
 		t.Error("string system prompt should be converted and cached")
+	}
+	if gjson.Get(result, "system.0.cache_control.ttl").String() != "1h" {
+		t.Error("string system prompt should have ttl=1h")
 	}
 	if gjson.Get(result, "system.0.text").String() != "A string system prompt" {
 		t.Error("system text should be preserved")

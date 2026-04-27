@@ -17,18 +17,23 @@ import (
 // applyCacheControlMarkers adds cache_control markers to optimize prompt caching.
 // Anthropic allows up to 4 explicit breakpoints per request.
 //
-// Strategy aligned with opencode (4 breakpoints, all ephemeral/5m):
+// Strategy (4 breakpoints, all 1h TTL):
 //  1. First system block - caches the main system prompt
 //  2. Second system block (if present) - caches additional instructions
 //  3. Second-to-last message (any role) - conversation history cache
 //  4. Last message (any role) - rolling cache for the current turn
 //
-// Tools are NOT explicitly cached here; they are auto-cached by
-// Anthropic via the top-level cache_control added in the caller.
+// All breakpoints use 1h TTL because:
+//   - 1h break-even after just 2 cache hits (common in multi-turn conversations)
+//   - Conversation sessions typically last 10-60 minutes with intermittent pauses
+//   - A single 5m cache miss on 200K tokens costs more than the 1h write premium
+//   - Each cache hit refreshes TTL at no extra cost
+//
+// Tools are auto-cached by Anthropic via the top-level cache_control.
 // Caching messages regardless of role (including assistant) ensures
 // thinking blocks (often thousands of tokens) are not reprocessed.
 func applyCacheControlMarkers(requestJSON string) string {
-	cc := map[string]string{"type": "ephemeral"}
+	cc := map[string]string{"type": "ephemeral", "ttl": "1h"}
 	breakpointsUsed := 0
 	const maxBreakpoints = 4
 
