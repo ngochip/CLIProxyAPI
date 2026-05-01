@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	log "github.com/sirupsen/logrus"
@@ -24,6 +25,8 @@ import (
 const (
 	defaultImagesMainModel = "gpt-5.4-mini"
 	defaultImagesToolModel = "gpt-image-2"
+	imagesGenerationsPath  = "/v1/images/generations"
+	imagesEditsPath        = "/v1/images/edits"
 )
 
 type imageCallResult struct {
@@ -97,6 +100,28 @@ func (a *sseFrameAccumulator) Flush() [][]byte {
 	}
 	a.pending = nil
 	return frames
+}
+
+func isSupportedImagesModel(model string) bool {
+	baseModel := strings.TrimSpace(model)
+	if idx := strings.LastIndex(baseModel, "/"); idx >= 0 && idx < len(baseModel)-1 {
+		baseModel = strings.TrimSpace(baseModel[idx+1:])
+	}
+	return baseModel == defaultImagesToolModel
+}
+
+func rejectUnsupportedImagesModel(c *gin.Context, model string) bool {
+	if isSupportedImagesModel(model) {
+		return false
+	}
+
+	c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+		Error: handlers.ErrorDetail{
+			Message: fmt.Sprintf("Model %s is not supported on %s or %s. Use %s.", model, imagesGenerationsPath, imagesEditsPath, defaultImagesToolModel),
+			Type:    "invalid_request_error",
+		},
+	})
+	return true
 }
 
 func mimeTypeFromOutputFormat(outputFormat string) string {
@@ -174,6 +199,11 @@ func parseBoolField(raw string, fallback bool) bool {
 }
 
 func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
+	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
 	rawJSON, err := c.GetRawData()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -194,6 +224,14 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		return
 	}
 
+	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+	if rejectUnsupportedImagesModel(c, imageModel) {
+		return
+	}
+
 	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
 	if prompt == "" {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -205,10 +243,6 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 		return
 	}
 
-	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
 	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
 	if responseFormat == "" {
 		responseFormat = "b64_json"
@@ -253,6 +287,11 @@ func (h *OpenAIAPIHandler) ImagesGenerations(c *gin.Context) {
 }
 
 func (h *OpenAIAPIHandler) ImagesEdits(c *gin.Context) {
+	if h != nil && h.BaseAPIHandler != nil && h.BaseAPIHandler.Cfg != nil && h.BaseAPIHandler.Cfg.DisableImageGeneration == internalconfig.DisableImageGenerationAll {
+		c.AbortWithStatus(http.StatusNotFound)
+		return
+	}
+
 	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
 	if strings.HasPrefix(contentType, "application/json") {
 		h.imagesEditsFromJSON(c)
@@ -280,6 +319,14 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 				Type:    "invalid_request_error",
 			},
 		})
+		return
+	}
+
+	imageModel := strings.TrimSpace(c.PostForm("model"))
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+	if rejectUnsupportedImagesModel(c, imageModel) {
 		return
 	}
 
@@ -340,10 +387,6 @@ func (h *OpenAIAPIHandler) imagesEditsFromMultipart(c *gin.Context) {
 		maskDataURL = &dataURL
 	}
 
-	imageModel := strings.TrimSpace(c.PostForm("model"))
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
 	responseFormat := strings.TrimSpace(c.PostForm("response_format"))
 	if responseFormat == "" {
 		responseFormat = "b64_json"
@@ -412,6 +455,14 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		return
 	}
 
+	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	if imageModel == "" {
+		imageModel = defaultImagesToolModel
+	}
+	if rejectUnsupportedImagesModel(c, imageModel) {
+		return
+	}
+
 	prompt := strings.TrimSpace(gjson.GetBytes(rawJSON, "prompt").String())
 	if prompt == "" {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
@@ -460,10 +511,6 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 		return
 	}
 
-	imageModel := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
-	if imageModel == "" {
-		imageModel = defaultImagesToolModel
-	}
 	responseFormat := strings.TrimSpace(gjson.GetBytes(rawJSON, "response_format").String())
 	if responseFormat == "" {
 		responseFormat = "b64_json"
@@ -499,7 +546,17 @@ func (h *OpenAIAPIHandler) imagesEditsFromJSON(c *gin.Context) {
 
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
-	req, _ = sjson.SetBytes(req, "model", defaultImagesMainModel)
+	mainModel := defaultImagesMainModel
+	if len(toolJSON) > 0 && json.Valid(toolJSON) {
+		toolModel := strings.TrimSpace(gjson.GetBytes(toolJSON, "model").String())
+		if idx := strings.LastIndex(toolModel, "/"); idx > 0 && idx < len(toolModel)-1 {
+			prefix := strings.TrimSpace(toolModel[:idx])
+			if prefix != "" {
+				mainModel = prefix + "/" + defaultImagesMainModel
+			}
+		}
+	}
+	req, _ = sjson.SetBytes(req, "model", mainModel)
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
 	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
@@ -527,9 +584,14 @@ func (h *OpenAIAPIHandler) collectImagesFromResponses(c *gin.Context, responsesR
 	c.Header("Content-Type", "application/json")
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
+	cliCtx = handlers.WithDisallowFreeAuth(cliCtx)
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
+	mainModel := strings.TrimSpace(gjson.GetBytes(responsesReq, "model").String())
+	if mainModel == "" {
+		mainModel = defaultImagesMainModel
+	}
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", mainModel, responsesReq, "")
 
 	out, errMsg := collectImagesFromResponsesStream(cliCtx, dataChan, errChan, responseFormat)
 	stopKeepAlive()
@@ -716,7 +778,12 @@ func (h *OpenAIAPIHandler) streamImagesFromResponses(c *gin.Context, responsesRe
 	}
 
 	cliCtx, cliCancel := h.GetContextWithCancel(h, c, context.Background())
-	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", defaultImagesMainModel, responsesReq, "")
+	cliCtx = handlers.WithDisallowFreeAuth(cliCtx)
+	mainModel := strings.TrimSpace(gjson.GetBytes(responsesReq, "model").String())
+	if mainModel == "" {
+		mainModel = defaultImagesMainModel
+	}
+	dataChan, upstreamHeaders, errChan := h.ExecuteStreamWithAuthManager(cliCtx, "openai-response", mainModel, responsesReq, "")
 
 	setSSEHeaders := func() {
 		c.Header("Content-Type", "text/event-stream")

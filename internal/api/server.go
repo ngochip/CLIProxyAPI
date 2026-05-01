@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -129,6 +131,12 @@ type Server struct {
 
 	// server is the underlying HTTP server.
 	server *http.Server
+
+	// muxBaseListener is the shared TCP listener used to serve both HTTP and Redis protocol traffic.
+	muxBaseListener net.Listener
+
+	// muxHTTPListener receives HTTP connections selected by the multiplexer.
+	muxHTTPListener *muxListener
 
 	// handlers contains the API handlers for processing requests.
 	handlers *handlers.BaseAPIHandler
@@ -302,6 +310,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// or when a local management password is provided (e.g. TUI mode).
 	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
 	s.managementRoutesEnabled.Store(hasManagementSecret)
+	redisqueue.SetEnabled(hasManagementSecret)
 	if hasManagementSecret {
 		s.registerManagementRoutes()
 	}
@@ -835,77 +844,117 @@ func (s *Server) Start() error {
 
 	// Handle legacy Enable flag for backwards compatibility
 	useLegacyTLS := s.cfg != nil && s.cfg.TLS.Enable && tlsMode == ""
+	if useLegacyTLS {
+		tlsMode = "manual"
+	}
+
+	addr := s.server.Addr
+	listener, errListen := net.Listen("tcp", addr)
+	if errListen != nil {
+		return fmt.Errorf("failed to start HTTP server: %v", errListen)
+	}
 
 	switch tlsMode {
 	case "manual":
-		return s.startWithManualTLS()
-	case "h2c":
-		return s.startWithH2C()
-	default:
-		if useLegacyTLS {
-			return s.startWithManualTLS()
+		if s.cfg == nil {
+			if errClose := listener.Close(); errClose != nil {
+				log.Errorf("failed to close listener after TLS validation failure: %v", errClose)
+			}
+			return fmt.Errorf("failed to start TLS server: config is nil")
 		}
-		return s.startHTTP()
-	}
-}
+		certPath := strings.TrimSpace(s.cfg.TLS.Cert)
+		keyPath := strings.TrimSpace(s.cfg.TLS.Key)
+		if certPath == "" || keyPath == "" {
+			if errClose := listener.Close(); errClose != nil {
+				log.Errorf("failed to close listener after TLS validation failure: %v", errClose)
+			}
+			return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
+		}
+		certPair, errLoad := tls.LoadX509KeyPair(certPath, keyPath)
+		if errLoad != nil {
+			if errClose := listener.Close(); errClose != nil {
+				log.Errorf("failed to close listener after TLS key pair load failure: %v", errClose)
+			}
+			return fmt.Errorf("failed to start HTTPS server: %v", errLoad)
+		}
 
-// startWithManualTLS starts the server with manually provided TLS certificates.
-// This enables HTTP/2 automatically.
-func (s *Server) startWithManualTLS() error {
-	if s.cfg == nil {
-		return fmt.Errorf("failed to start TLS server: config is nil")
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{certPair},
+			NextProtos:   []string{"h2", "http/1.1"},
+			MinVersion:   tls.VersionTLS12,
+		}
+		s.server.TLSConfig = tlsConfig
+		// Tham số HTTP/2 tối ưu cho streaming (cần cho client như Cursor).
+		h2s := &http2.Server{
+			MaxConcurrentStreams: 250,
+			MaxReadFrameSize:     1 << 20, // 1MB
+			IdleTimeout:          120 * time.Second,
+		}
+		if errHTTP2 := http2.ConfigureServer(s.server, h2s); errHTTP2 != nil {
+			log.Warnf("failed to configure HTTP/2: %v", errHTTP2)
+		}
+		listener = tls.NewListener(listener, tlsConfig)
+		log.Debugf("Starting API server on %s with manual TLS (HTTP/2 enabled)", addr)
+	case "h2c":
+		log.Debugf("Starting API server on %s with HTTP/2 cleartext (h2c)", addr)
+	default:
+		log.Debugf("Starting API server on %s", addr)
 	}
 
-	cert := strings.TrimSpace(s.cfg.TLS.Cert)
-	key := strings.TrimSpace(s.cfg.TLS.Key)
-	if cert == "" || key == "" {
-		return fmt.Errorf("failed to start HTTPS server: tls.cert or tls.key is empty")
-	}
+	httpListener := newMuxListener(listener.Addr(), 1024)
+	s.muxBaseListener = listener
+	s.muxHTTPListener = httpListener
 
-	// Configure TLS for HTTP/2
-	s.server.TLSConfig = &tls.Config{
-		NextProtos: []string{"h2", "http/1.1"},
-		MinVersion: tls.VersionTLS12,
-	}
+	httpErrCh := make(chan error, 1)
+	acceptErrCh := make(chan error, 1)
 
-	// Cấu hình HTTP/2 server với các tham số tối ưu cho streaming
-	// Điều này cần thiết để HTTP/2 hoạt động đúng với các client như Cursor
-	h2s := &http2.Server{
-		// MaxConcurrentStreams giới hạn số stream đồng thời trên một connection
-		MaxConcurrentStreams: 250,
-		// MaxReadFrameSize là kích thước frame tối đa server sẽ đọc
-		MaxReadFrameSize: 1 << 20, // 1MB
-		// IdleTimeout là thời gian connection có thể idle trước khi bị đóng
-		IdleTimeout: 120 * time.Second,
-	}
-	if err := http2.ConfigureServer(s.server, h2s); err != nil {
-		return fmt.Errorf("failed to configure HTTP/2: %v", err)
-	}
+	go func() {
+		httpErrCh <- s.server.Serve(httpListener)
+	}()
+	go func() {
+		acceptErrCh <- s.acceptMuxConnections(listener, httpListener)
+	}()
 
-	log.Debugf("Starting API server on %s with manual TLS (HTTP/2 enabled)", s.server.Addr)
-	if err := s.server.ListenAndServeTLS(cert, key); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("failed to start HTTPS server: %v", err)
+	select {
+	case errServe := <-httpErrCh:
+		if s.muxBaseListener != nil {
+			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+				log.Debugf("failed to close shared listener after HTTP serve exit: %v", errClose)
+			}
+		}
+		if s.muxHTTPListener != nil {
+			_ = s.muxHTTPListener.Close()
+		}
+		errAccept := <-acceptErrCh
+		errServe = normalizeHTTPServeError(errServe)
+		errAccept = normalizeListenerError(errAccept)
+		if errServe != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errServe)
+		}
+		if errAccept != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errAccept)
+		}
+		return nil
+	case errAccept := <-acceptErrCh:
+		if s.muxHTTPListener != nil {
+			_ = s.muxHTTPListener.Close()
+		}
+		if s.muxBaseListener != nil {
+			if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+				log.Debugf("failed to close shared listener after accept loop exit: %v", errClose)
+			}
+		}
+		errServe := <-httpErrCh
+		errServe = normalizeHTTPServeError(errServe)
+		errAccept = normalizeListenerError(errAccept)
+		if errAccept != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errAccept)
+		}
+		if errServe != nil {
+			return fmt.Errorf("failed to start HTTP server: %v", errServe)
+		}
+		return nil
 	}
-	return nil
-}
-
-// startWithH2C starts the server with HTTP/2 cleartext (no TLS).
-// This is useful when running behind a reverse proxy that terminates TLS.
-func (s *Server) startWithH2C() error {
-	log.Debugf("Starting API server on %s with HTTP/2 cleartext (h2c)", s.server.Addr)
-	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("failed to start h2c server: %v", err)
-	}
-	return nil
-}
-
-// startHTTP starts the server in plain HTTP/1.1 mode.
-func (s *Server) startHTTP() error {
-	log.Debugf("Starting API server on %s (HTTP/1.1)", s.server.Addr)
-	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("failed to start HTTP server: %v", err)
-	}
-	return nil
 }
 
 // Stop gracefully shuts down the API server without interrupting any
@@ -923,6 +972,15 @@ func (s *Server) Stop(ctx context.Context) error {
 		select {
 		case s.keepAliveStop <- struct{}{}:
 		default:
+		}
+	}
+
+	if s.muxHTTPListener != nil {
+		_ = s.muxHTTPListener.Close()
+	}
+	if s.muxBaseListener != nil {
+		if errClose := s.muxBaseListener.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			log.Debugf("failed to close shared listener: %v", errClose)
 		}
 	}
 
@@ -1010,6 +1068,10 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	}
 
+	if oldCfg != nil && oldCfg.DisableImageGeneration != cfg.DisableImageGeneration {
+		log.Infof("disable-image-generation updated: %v -> %v", oldCfg.DisableImageGeneration, cfg.DisableImageGeneration)
+	}
+
 	applySignatureCacheConfig(oldCfg, cfg)
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {
@@ -1055,6 +1117,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			s.managementRoutesEnabled.Store(!newSecretEmpty)
 		}
 	}
+	redisqueue.SetEnabled(s.managementRoutesEnabled.Load())
 
 	s.applyAccessConfig(oldCfg, cfg)
 	s.cfg = cfg
@@ -1099,6 +1162,9 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	openAICompatCount := 0
 	for i := range cfg.OpenAICompatibility {
 		entry := cfg.OpenAICompatibility[i]
+		if entry.Disabled {
+			continue
+		}
 		openAICompatCount += len(entry.APIKeyEntries)
 	}
 
